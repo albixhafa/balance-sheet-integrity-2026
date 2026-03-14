@@ -1,6 +1,6 @@
-# 📊 Balance Sheet Integrity (DEMO: Albixhafa.com/balancesheet)
+# 📊 Balance Sheet Integrity
 
-A production-ready, full-stack financial balance sheet and reconciliation application. Built for secure, scalable financial tracking, this app allows teams to import General Ledger (GL) activity, attach supporting documentation, and manage reconciliation workflows seamlessly.
+A production-ready, full-stack financial balance sheet and reconciliation application. Built for secure, scalable financial tracking, this app allows teams to import General Ledger (GL) activity, attach supporting documentation, and manage reconciliation workflows seamlessly. (Demo: albixhafa.com/balancesheet)
 
 ## ✨ Core Functionality
 
