@@ -1,0 +1,175 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// --- ENUMS ---
+enum Role {
+  ASSEMBLER
+  REVIEWER
+  APPROVER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum Status {
+  ACTIVE
+  INACTIVE
+}
+
+enum RecStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+// --- MODELS ---
+
+model User {
+  id                     String   @id @default(cuid())
+  name                   String
+  email                  String   @unique
+  passwordHash           String
+  requiresPasswordChange Boolean  @default(true)
+  failedLoginAttempts    Int      @default(0)     // <-- NEW: Tracks failed tries
+  isLockedOut            Boolean  @default(false) // <-- NEW: Flags the account as locked
+  role                   Role     @default(ASSEMBLER)
+  status                 Status   @default(ACTIVE)
+  isReadOnly             Boolean  @default(false)
+  createdAt              DateTime @default(now())
+
+  // Scoped Access: Users can now be assigned to multiple entities.
+  entities     Entity[]
+
+  // Audit trail of every approval this user has made
+  approvals    Approval[]
+}
+
+model Entity {
+  id           String   @id @default(cuid())
+  code         String   @unique // Enforced 6-char alphanumeric (e.g., "ABC001")
+  name         String
+  status       Status   @default(ACTIVE)
+  createdAt    DateTime @default(now())
+
+  users        User[]
+  glAccounts   GLAccount[]
+  transactions Transaction[]
+}
+
+model GLAccount {
+  id           String   @id // 12-digit string, e.g., "100120000000"
+  description  String
+  status       Status   @default(ACTIVE)
+  createdAt    DateTime @default(now())
+  
+  entityCode   String
+  entity       Entity   @relation(fields: [entityCode], references: [code])
+
+  // The 10 Sub-Account Dimension Labels (Configured per GL)
+  sub1Name     String?
+  sub2Name     String?
+  sub3Name     String?
+  sub4Name     String?
+  sub5Name     String?
+  sub6Name     String?
+  sub7Name     String?
+  sub8Name     String?
+  sub9Name     String?
+  sub10Name    String?
+
+  transactions    Transaction[]
+  reconciliations AccountReconciliation[]
+}
+
+model FinancialPeriod {
+  id           String   @id // YYYYMM format, e.g., "202603"
+  isClosed     Boolean  @default(false)
+  closedAt     DateTime?
+  closedById   String?  // ID of the Admin who executed the hard close
+  
+  transactions    Transaction[]
+  reconciliations AccountReconciliation[]
+}
+
+model Transaction {
+  id              String   @id @default(cuid())
+  txnDate         String   // YYYYMMDD format
+  amount          Decimal  @db.Decimal(12, 2) // Max 1 Billion, strict 2 decimal places
+  description     String?
+  reference       String?  // Check numbers, PMS reference IDs, etc.
+  supportFileUrl  String?  // Cloud storage link for the backup PDF/CSV
+  cleared         Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  // The actual Sub-Account values imported from the CSV
+  sub1Value       String?
+  sub2Value       String?
+  sub3Value       String?
+  sub4Value       String?
+  sub5Value       String?
+  sub6Value       String?
+  sub7Value       String?
+  sub8Value       String?
+  sub9Value       String?
+  sub10Value      String?
+
+  // Relational Mapping
+  entityCode      String
+  entity          Entity   @relation(fields: [entityCode], references: [code])
+  
+  glId            String
+  glAccount       GLAccount @relation(fields: [glId], references: [id])
+  
+  periodId        String
+  period          FinancialPeriod @relation(fields: [periodId], references: [id])
+
+  // Track the 3 required sign-offs per transaction
+  approvals       Approval[]
+
+  // --- ADD THIS NEW LINE ---
+  // Rejects the row if this exact combination already exists in the database
+  @@unique([entityCode, glId, txnDate, reference, amount])
+}
+
+model Approval {
+  id            String   @id @default(cuid())
+  timestamp     DateTime @default(now())
+  
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+
+  // Ensure a single user cannot approve the same transaction twice
+  @@unique([userId, transactionId]) 
+}
+
+// Tracks the high-level workflow status of an account for a specific month
+model AccountReconciliation {
+  id           String    @id @default(cuid())
+  status       RecStatus @default(PENDING)
+  
+  glId         String
+  glAccount    GLAccount @relation(fields: [glId], references: [id])
+  
+  periodId     String
+  period       FinancialPeriod @relation(fields: [periodId], references: [id])
+
+  // Once a month is complete, these hold the IDs of the users who signed off on the whole account
+  assemblerId  String?
+  assembledAt  DateTime?  // <-- NEWLY ADDED
+  reviewerId   String?
+  reviewedAt   DateTime?  // <-- NEWLY ADDED
+  approverId   String?
+  approvedAt   DateTime?  // <-- NEWLY ADDED
+
+  // Ensure there is only one reconciliation state per GL per Period
+  @@unique([glId, periodId]) 
+}
