@@ -1,96 +1,62 @@
 "use client";
 
-import React, { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { Lock, ShieldAlert, Loader2 } from 'lucide-react';
-import { forcePasswordChange } from '@/app/actions/auth';
+import { useState } from "react";
+import { Lock, ShieldAlert, Loader2 } from "lucide-react";
+import { completeRequiredPasswordChange, logout } from "@/app/actions/auth";
+import { handleAuthLoss } from "@/components/ui";
 
 export default function ChangePasswordPage() {
-  const router = useRouter();
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [pw, setPw] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
-    setLoading(true);
-
-    try {
-      const formData = new FormData(e.currentTarget);
-      await forcePasswordChange(formData);
-      
-    // Force a hard reload to clear the Next.js cache and fetch the unlocked user!
-      window.location.href = '/';
-    } catch (err: any) {
-      setError(err.message || 'Failed to update password. Please try again.');
-      setLoading(false);
+    setError("");
+    if (pw !== confirm) { setError("The passwords do not match."); return; }
+    setBusy(true);
+    const res = await completeRequiredPasswordChange(pw, confirm);
+    if (!res.ok) {
+      if (handleAuthLoss(res)) return;
+      setError(res.error);
+      setBusy(false);
+      return;
     }
+    // Was window.location.href = "/", which ignored the /balancesheet base path
+    // and dropped people on the portfolio homepage.
+    window.location.href = "/balancesheet";
   };
 
   return (
-    <div className="min-h-full flex flex-col items-center justify-center p-8 bg-slate-50">
-      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-200">
-        
-        {/* Header */}
-        <div className="bg-amber-50 px-8 py-6 border-b border-amber-100 flex flex-col items-center text-center">
-          <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mb-4">
-            <ShieldAlert size={32} />
-          </div>
-          <h1 className="text-xl font-bold text-amber-900">Action Required</h1>
-          <p className="text-sm text-amber-700 mt-2">
-            You are using a temporary or compromised password. You must secure your account before accessing the financial system.
-          </p>
+    <div className="min-h-full flex items-center justify-center p-6 bg-slate-50">
+      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
+        <div className="bg-amber-50 p-6 border-b border-amber-100 text-center">
+          <ShieldAlert size={32} className="text-amber-600 mx-auto mb-2" />
+          <h1 className="text-xl font-bold text-amber-900">Set a new password</h1>
+          <p className="text-sm text-amber-800 mt-1.5">You signed in with a temporary password. Choose your own before continuing.</p>
         </div>
-
-        {/* Form */}
-        <div className="p-8">
-          {error && (
-            <div className="mb-6 p-3 bg-rose-50 border border-rose-200 text-rose-600 text-sm rounded-lg text-center font-medium">
-              {error}
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} className="space-y-5">
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1">New Password</label>
-              <div className="relative">
+        <form onSubmit={submit} className="p-6 space-y-4">
+          {error && <div role="alert" className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-sm font-medium text-rose-800">{error}</div>}
+          {[["New password", pw, setPw, "new-password"], ["Confirm new password", confirm, setConfirm, "new-password"]].map(([label, val, set, ac]) => (
+            <label key={label as string} className="block">
+              <span className="block text-sm font-semibold text-slate-700 mb-1">{label as string}</span>
+              <span className="relative block">
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                <input 
-                  required 
-                  name="newPassword" 
-                  type="password" 
-                  minLength={8}
-                  className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 outline-none transition-all"
-                  placeholder="Minimum 8 characters"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 mb-1">Confirm New Password</label>
-              <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                <input 
-                  required 
-                  name="confirmPassword" 
-                  type="password" 
-                  minLength={8}
-                  className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 outline-none transition-all"
-                  placeholder="Retype new password"
-                />
-              </div>
-            </div>
-
-            <button 
-              type="submit" 
-              disabled={loading}
-              className="w-full mt-4 bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 shadow-sm disabled:opacity-70"
-            >
-              {loading ? <Loader2 className="animate-spin" size={20} /> : 'Secure My Account'}
-            </button>
-          </form>
-        </div>
-        
+                <input required type="password" minLength={10} maxLength={72} autoComplete={ac as string} value={val as string}
+                  onChange={(e) => (set as (v: string) => void)(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 outline-none" />
+              </span>
+            </label>
+          ))}
+          <p className="text-xs text-slate-500">At least 10 characters. It cannot be the temporary password.</p>
+          <button type="submit" disabled={busy}
+            className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-2.5 rounded-lg flex items-center justify-center gap-2 disabled:opacity-70">
+            {busy ? <Loader2 className="animate-spin" size={18} /> : "Save and continue"}
+          </button>
+          <button type="button" onClick={async () => { await logout(); window.location.href = "/balancesheet/login"; }}
+            className="w-full text-sm text-slate-500 hover:text-slate-700">Sign out instead</button>
+        </form>
       </div>
     </div>
   );

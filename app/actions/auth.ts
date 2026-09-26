@@ -1,154 +1,120 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
+import crypto from "crypto";
 import bcrypt from "bcryptjs";
-import { cookies } from "next/headers";
+import { prisma } from "@/lib/prisma";
+import { run } from "@/lib/errors";
+import { AppError } from "@/lib/errors";
+import { createSession, destroyCurrentSession, revokeUserSessions } from "@/lib/session";
+import { getCurrentUser, requireUser } from "@/lib/auth";
+import { passwordProblem, BCRYPT_ROUNDS } from "@/lib/password";
+import { logEvent } from "@/lib/audit";
 
-export async function authenticateUser(email: string, pass: string) {
-  if (!email || !pass) {
-    return { success: false, error: "Email and password are required." };
-  }
+const MAX_FAILED_ATTEMPTS = 5;
+// A real bcrypt hash of a random string, made once per process. Comparing
+// against it when the email does not exist makes a miss take as long as a
+// wrong password, so response time does not reveal which emails have accounts.
+// It has to be generated rather than pasted in: bcrypt rejects a malformed
+// hash instantly, which would bring the timing difference straight back.
+const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(18).toString("hex"), BCRYPT_ROUNDS);
 
-  // 1. Find the user (case-insensitive)
-  const user = await prisma.user.findUnique({
-    where: { email: email.toLowerCase() }
+export async function login(emailRaw: string, password: string) {
+  return run("login", async () => {
+    const email = String(emailRaw ?? "").trim().toLowerCase();
+    if (!email || !password) throw new AppError("Email and password are required.");
+    if (email.length > 254 || password.length > 200) throw new AppError("Invalid email or password.");
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      await bcrypt.compare(password, DUMMY_HASH);
+      throw new AppError("Invalid email or password.");
+    }
+    if (user.isLockedOut) {
+      throw new AppError("This account is locked after too many failed attempts. Ask an administrator to reset it.");
+    }
+
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) {
+      // Increment in the database, not from a value read earlier, so parallel
+      // guesses cannot each see "4 attempts" and all slip through.
+      const updated = await prisma.user.update({
+        where: { id: user.id },
+        data: { failedLoginAttempts: { increment: 1 } },
+        select: { failedLoginAttempts: true },
+      });
+      if (updated.failedLoginAttempts >= MAX_FAILED_ATTEMPTS) {
+        await prisma.user.update({ where: { id: user.id }, data: { isLockedOut: true } });
+        await revokeUserSessions(user.id);
+        await logEvent(prisma, { actorId: null, action: "ACCOUNT_LOCKED", targetUserId: user.id });
+        throw new AppError("This account is now locked after too many failed attempts. Ask an administrator to reset it.");
+      }
+      const left = MAX_FAILED_ATTEMPTS - updated.failedLoginAttempts;
+      throw new AppError(`Invalid email or password. ${left} attempt${left === 1 ? "" : "s"} left before the account locks.`);
+    }
+
+    // Only revealed to someone who knows the password.
+    if (user.status !== "ACTIVE") throw new AppError("This account has been deactivated. Contact an administrator.");
+
+    await prisma.user.update({ where: { id: user.id }, data: { failedLoginAttempts: 0 } });
+    await createSession(user.id);
+    await logEvent(prisma, { actorId: user.id, action: "LOGIN" });
+    return { redirectTo: user.requiresPasswordChange ? "/change-password" : "/" };
   });
+}
 
-  // 2. Standardize generic error so we don't leak which emails exist to hackers
-  if (!user) {
-    return { success: false, error: "Invalid credentials." };
-  }
+export async function logout() {
+  return run("logout", async () => {
+    await destroyCurrentSession();
+    return null;
+  });
+}
 
-  // 3. Check System Statuses
-  if (user.status !== "ACTIVE") {
-    return { success: false, error: "Account deactivated. Contact an administrator." };
-  }
+/** The signed-in user in the safe shape, for client pages. Null when signed out. */
+export async function getMe() {
+  return run("getMe", async () => getCurrentUser());
+}
 
-  if (user.isLockedOut) {
-    return { success: false, error: "Account locked due to too many failed attempts. Contact an administrator." };
-  }
-
-  // 4. Verify Password
-  const isMatch = await bcrypt.compare(pass, user.passwordHash);
-
-  if (!isMatch) {
-    // Math for lockouts
-    const newAttempts = user.failedLoginAttempts + 1;
-    const lockAccount = newAttempts >= 5;
+/** Voluntary change from the profile page: requires the current password, and
+ *  signs out every other browser. */
+export async function changePassword(currentPassword: string, newPassword: string) {
+  return run("changePassword", async () => {
+    const me = await requireUser();
+    const row = await prisma.user.findUniqueOrThrow({ where: { id: me.id } });
+    if (!(await bcrypt.compare(String(currentPassword ?? ""), row.passwordHash))) {
+      throw new AppError("Your current password is incorrect.");
+    }
+    const problem = passwordProblem(newPassword, me.email);
+    if (problem) throw new AppError(problem);
+    if (await bcrypt.compare(newPassword, row.passwordHash)) throw new AppError("Choose a password different from your current one.");
 
     await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        failedLoginAttempts: newAttempts,
-        isLockedOut: lockAccount
-      }
+      where: { id: me.id },
+      data: { passwordHash: await bcrypt.hash(newPassword, BCRYPT_ROUNDS), requiresPasswordChange: false },
     });
-
-    if (lockAccount) {
-      return { success: false, error: "Account locked due to 5 failed login attempts. Contact an administrator." };
-    } else {
-      const remaining = 5 - newAttempts;
-      return { success: false, error: `Invalid credentials. ${remaining} attempt(s) remaining.` };
-    }
-  }
-
-  // 5. SUCCESS! Reset failure counters
-  await prisma.user.update({
-    where: { id: user.id },
-    data: { failedLoginAttempts: 0 }
+    await revokeUserSessions(me.id, true);
+    await logEvent(prisma, { actorId: me.id, action: "PASSWORD_CHANGED" });
+    return null;
   });
-
-  // 6. Create the Session Cookie (8 hours)
-  const cookieStore = await cookies();
-  cookieStore.set("session_userid", user.id, {
-    httpOnly: true, // Prevents JavaScript hackers from stealing the cookie
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    path: "/",
-    maxAge: 60 * 60 * 8 
-  });
-
-  // 7. Route Controller
-  if (user.requiresPasswordChange) {
-    return { success: true, redirectTo: "/change-password" };
-  }
-
-  return { success: true, redirectTo: "/" }; // Default dashboard
 }
 
-// --- GET LOGGED IN USER ---
-export async function getLoggedInUser() {
-  const cookieStore = await cookies();
-  const userId = cookieStore.get("session_userid")?.value;
+/** The forced change after a temporary password. The temporary password was
+ *  just used to sign in, so it is not asked for again - but it cannot be reused. */
+export async function completeRequiredPasswordChange(newPassword: string, confirmPassword: string) {
+  return run("completeRequiredPasswordChange", async () => {
+    const me = await requireUser({ allowPasswordChange: true });
+    if (!me.requiresPasswordChange) return null;
+    if (newPassword !== confirmPassword) throw new AppError("The passwords do not match.");
+    const problem = passwordProblem(newPassword, me.email);
+    if (problem) throw new AppError(problem);
+    const row = await prisma.user.findUniqueOrThrow({ where: { id: me.id } });
+    if (await bcrypt.compare(newPassword, row.passwordHash)) throw new AppError("Choose a password different from the temporary one.");
 
-  if (!userId) return null;
-
-  // Fetch the basic info PLUS their security flags
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { 
-      name: true, 
-      role: true, 
-      email: true, 
-      entities: true,
-      requiresPasswordChange: true // <-- ADDED THIS!
-    } 
+    await prisma.user.update({
+      where: { id: me.id },
+      data: { passwordHash: await bcrypt.hash(newPassword, BCRYPT_ROUNDS), requiresPasswordChange: false },
+    });
+    await revokeUserSessions(me.id, true);
+    await logEvent(prisma, { actorId: me.id, action: "PASSWORD_SET" });
+    return null;
   });
-
-  return user;
-}
-
-// --- LOGOUT USER ---
-export async function logoutUser() {
-  const cookieStore = await cookies();
-  cookieStore.delete("session_userid");
-  return { success: true };
-}
-// --- UPDATE PASSWORD ---
-export async function updatePassword(password: string) {
-  const cookieStore = await cookies();
-  const userId = cookieStore.get("session_userid")?.value;
-
-  if (!userId) return { success: false, error: "Not authenticated" };
-
-  const hashedPassword = await bcrypt.hash(password, 10);
-
-  await prisma.user.update({
-    where: { id: userId },
-    data: {
-      passwordHash: hashedPassword,
-      requiresPasswordChange: false, // Unlocks the app if they had a temporary password
-    }
-  });
-
-  return { success: true };
-}
-
-// --- FORCE PASSWORD CHANGE ---
-export async function forcePasswordChange(formData: FormData) {
-  const newPassword = formData.get("newPassword") as string;
-  const confirmPassword = formData.get("confirmPassword") as string;
-  
-  if (newPassword !== confirmPassword) {
-    throw new Error("Passwords do not match.");
-  }
-
-  const cookieStore = await cookies();
-  const userId = cookieStore.get("session_userid")?.value;
-
-  if (!userId) throw new Error("Not authenticated");
-
-  // Hash the new password (bcrypt is already imported at the top!)
-  const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-  // Update the user and remove the security lock
-  await prisma.user.update({
-    where: { id: userId },
-    data: {
-      passwordHash: hashedPassword,
-      requiresPasswordChange: false 
-    }
-  });
-
-  return { success: true };
 }

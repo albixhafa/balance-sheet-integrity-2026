@@ -1,689 +1,490 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-import Link from 'next/link';
-import { ChevronDown, ChevronRight, Paperclip, FileText, CheckCircle2, UploadCloud, PlusSquare, MinusSquare, UserCheck, ShieldCheck, Clock, Lock, AlertCircle, XCircle, Loader2, Save, CheckSquare } from 'lucide-react';
-import { useParams, useRouter } from 'next/navigation'; 
-import { getAccountDetails, signOff, rejectWorkflow, saveAdjustments, toggleClearedStatus, unsign } from '@/app/actions/account';
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import {
+  ChevronDown, ChevronRight, Paperclip, CheckCircle2, UploadCloud, UserCheck, ShieldCheck, Lock,
+  AlertCircle, XCircle, Loader2, CheckSquare, MinusSquare, History, RotateCcw, Undo2, FileWarning,
+} from "lucide-react";
+import { getAccountDetails } from "@/app/actions/ledger";
+import {
+  signOff, undoSignOff, rejectReconciliation, reopenPeriod, setCleared, uploadAttachment, linkAttachment, removeAttachment,
+} from "@/app/actions/workflow";
+import { formatPeriod, formatCents, formatTxnDate, formatDateTime, formatBytes } from "@/lib/format";
+import { nextPeriod } from "@/lib/periods";
+import { ErrorBanner, SuccessBanner, handleAuthLoss } from "@/components/ui";
 
-const formatPeriod = (p: string) => {
-  if (!p || p.length !== 6) return p;
-  const year = p.substring(0, 4);
-  const monthNum = parseInt(p.substring(4, 6), 10);
-  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-  return `${months[monthNum - 1]} ${year}`;
+type Decision = { allowed: boolean; reason?: string };
+type Sig = { name: string; at: string | null } | null;
+type Line = {
+  id: string; txnDate: string; reference: string | null; description: string | null; amountCents: number; cleared: boolean;
+  rolledFrom: string | null; subs: (string | null)[]; attachment: { id: string; fileName: string; size: number } | null; legacyFileName: string | null;
+};
+type Details = {
+  me: { id: string; name: string; role: string; isReadOnly: boolean; isAdmin: boolean };
+  gl: { id: string; description: string; status: string; entityCode: string; entityName: string; entityStatus: string; subNames: (string | null)[] };
+  activePeriod: string; lastClosed: string | null; clearedNetCents: number;
+  signatures: { assembler: Sig; reviewer: Sig; approver: Sig };
+  decisions: {
+    sign: { assembler: Decision; reviewer: Decision; approver: Decision };
+    unsign: { assembler: Decision; reviewer: Decision };
+    reject: { reviewer: Decision; approver: Decision };
+    reopen: Decision; editLines: Decision; attach: Decision;
+  };
+  lines: Line[]; futureCount: number;
+  history: { periodId: string; assembler: Sig; reviewer: Sig; approver: Sig; lines: Line[] }[];
+  events: { id: string; at: string; action: string; actor: string; periodId: string | null; detail: unknown }[];
 };
 
-export default function AccountDetails() {
+const fileHref = (id: string) => `/balancesheet/api/attachments/${id}`;
+
+const EVENT_LABEL: Record<string, string> = {
+  SIGNED_ASSEMBLER: "signed assembly", SIGNED_REVIEWER: "signed review", SIGNED_APPROVER: "gave final approval",
+  UNSIGNED_ASSEMBLER: "undid assembly", UNSIGNED_REVIEWER: "undid review",
+  REJECTED_AT_REVIEWER: "rejected at review", REJECTED_AT_APPROVER: "rejected at approval",
+  PERIOD_REOPENED: "reopened the period", ITEMS_ROLLED_FORWARD: "rolled open items forward",
+  LINES_CLEARED: "cleared lines", LINES_UNCLEARED: "un-cleared lines",
+  SUPPORT_ATTACHED: "attached support", SUPPORT_LINKED: "re-used support", SUPPORT_REMOVED: "removed support",
+  GL_CREATED: "created the GL", GL_UPDATED: "edited the GL",
+};
+
+function describeEvent(e: Details["events"][number]) {
+  const d = (e.detail ?? {}) as Record<string, unknown>;
+  const bits: string[] = [];
+  if (typeof d.reason === "string") bits.push(`"${d.reason}"`);
+  if (typeof d.count === "number") bits.push(`${d.count} line${d.count === 1 ? "" : "s"}`);
+  if (typeof d.lines === "number") bits.push(`${d.lines} line${d.lines === 1 ? "" : "s"}`);
+  if (typeof d.file === "string") bits.push(d.file);
+  if (typeof d.to === "string") bits.push(`to ${formatPeriod(d.to, "short")}`);
+  if (typeof d.itemsMovedBack === "number") bits.push(`${d.itemsMovedBack} item${d.itemsMovedBack === 1 ? "" : "s"} moved back`);
+  return bits.join(" · ");
+}
+
+function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={title}>
+        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+          <h3 className="font-bold text-slate-900">{title}</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700" aria-label="Close"><XCircle size={20} /></button>
+        </div>
+        <div className="p-6">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+type Pending =
+  | { kind: "sign"; step: "assembler" | "reviewer" | "approver" }
+  | { kind: "reject"; level: "reviewer" | "approver" }
+  | { kind: "reopen" }
+  | null;
+
+const STEP_TITLE = { assembler: "Assembly", reviewer: "Review", approver: "Final approval" } as const;
+
+export default function AccountPage() {
   const params = useParams();
-  const router = useRouter(); 
-  
-  const glId = (params?.id as string) || ''; 
-
+  const glId = String(params?.id ?? "");
+  const [data, setData] = useState<Details | null>(null);
   const [loading, setLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false); 
-  const [currentUser, setCurrentUser] = useState<any>(null);
-  const [accountData, setAccountData] = useState<any>(null);
-  
-  const [currentPeriodId, setCurrentPeriodId] = useState<string>('');
-  const [currentRows, setCurrentRows] = useState<any[]>([]);
-  const [signatures, setSignatures] = useState<any>({ assembler: null, reviewer: null, approver: null });
-  const [historicalData, setHistoricalData] = useState<any[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [showSubs, setShowSubs] = useState(false);
+  const [openHistory, setOpenHistory] = useState<string[]>([]);
+  const [pending, setPending] = useState<Pending>(null);
+  const [confirmChecked, setConfirmChecked] = useState(false);
+  const [reason, setReason] = useState("");
 
-  const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]); 
-  const [showSubs, setShowSubs] = useState(false); 
-  const [expandedHistory, setExpandedHistory] = useState<string[]>([]);
-  const [isCurrentPeriodExpanded, setIsCurrentPeriodExpanded] = useState(true);
-
-  const loadData = async () => {
-    if (!glId) return; 
-
-    setLoading(true);
-    try {
-      const data = await getAccountDetails(glId);
-      
-      setCurrentUser(data.currentUser);
-      setAccountData(data.glAccount);
-      setCurrentPeriodId(data.currentPeriodId);
-      
-      // --- Map supportFileUrl to 'file' so the UI can read it! ---
-      const mappedCurrent = data.currentTransactions.map((t: any) => ({
-        ...t,
-        file: t.supportFileUrl || null
-      }));
-      setCurrentRows(mappedCurrent);
-
-      const mappedHistorical = data.historicalPeriods.map((h: any) => ({
-        ...h,
-        transactions: h.transactions.map((t: any) => ({
-          ...t,
-          file: t.supportFileUrl || null
-        }))
-      }));
-      setHistoricalData(mappedHistorical);
-
-      // --- THE FIX: Safely check if the date exists before calling new Date() ---
-      setSignatures({
-        assembler: data.currentRecon?.assembler && data.currentRecon.assembledAt
-          ? { name: data.currentRecon.assembler.name, date: new Date(data.currentRecon.assembledAt).toLocaleString() } 
-          : null,
-        reviewer: data.currentRecon?.reviewer && data.currentRecon.reviewedAt
-          ? { name: data.currentRecon.reviewer.name, date: new Date(data.currentRecon.reviewedAt).toLocaleString() } 
-          : null,
-        approver: data.currentRecon?.approver && data.currentRecon.approvedAt
-          ? { name: data.currentRecon.approver.name, date: new Date(data.currentRecon.approvedAt).toLocaleString() } 
-          : null,
-      });
-    } catch (error: any) {
-      console.error("Failed to load account details", error);
-      alert(error.message || "You do not have access to this page.");
-      router.push('/'); 
+  const load = useCallback(async () => {
+    const res = await getAccountDetails(glId);
+    if (!res.ok) {
+      if (handleAuthLoss(res)) return;
+      setLoadError(res.error);
+    } else {
+      setData(res.data as Details);
+      setLoadError(null);
+      // Drop selections of lines that are no longer in the current period.
+      setSelected((s) => s.filter((id) => (res.data as Details).lines.some((l) => l.id === id)));
     }
     setLoading(false);
-  };
-
-  useEffect(() => {
-    if (glId) loadData(); 
   }, [glId]);
 
-  const currentClearedTxns = currentRows.filter(r => r.cleared);
-  const clearedNetTotal = currentClearedTxns.reduce((sum, r) => sum + Number(r.amount || 0), 0);
-  const isClearedNetZero = currentRows.length === 0 || Math.abs(clearedNetTotal) < 0.01;
+  useEffect(() => { if (glId) load(); }, [glId, load]);
 
-  const currentPeriodTotal = currentRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
-  const historicalTotal = historicalData.reduce((sum, hist) => sum + hist.transactions.reduce((s: number, r: any) => s + Number(r.amount || 0), 0), 0);
-  const ytdTotal = currentPeriodTotal + historicalTotal;
-  const derivedStatus = signatures.approver ? 'Completed' : signatures.assembler ? 'In Progress' : 'Pending';
-
-  const selectedRowsData = currentRows.filter(row => selectedRowIds.includes(row.id));
-  const selectedNetTotal = selectedRowsData.reduce((sum, row) => sum + Number(row.amount || 0), 0);
-  const allSelectedAreCleared = selectedRowsData.length > 0 && selectedRowsData.every(r => r.cleared);
-  const isNetZero = selectedRowsData.length > 0 && Math.abs(selectedNetTotal) < 0.01;
-  const selectedRowsWithFiles = selectedRowsData.filter(r => r.file);
-  const fileToShare = selectedRowsWithFiles.length > 0 ? selectedRowsWithFiles[0].file : null;
-
-  const sortedRows = [...currentRows].sort((a, b) => {
-    if (a.cleared === b.cleared) return a.txnDate.localeCompare(b.txnDate); 
-    return a.cleared ? 1 : -1; 
-  });
-
-  const handleSignOff = async (role: 'assembler' | 'reviewer' | 'approver') => {
-    const firstConfirm = window.confirm(`Are you sure you want to officially sign off as the ${role.toUpperCase()}?`);
-    if (!firstConfirm) return;
-    const secondConfirm = window.confirm(`FINAL VERIFICATION: By clicking OK, you legally confirm you have reviewed all balances and attached support for this period.`);
-    if (!secondConfirm) return;
-
-    setIsSaving(true);
-    setSignatures((prev: any) => ({
-      ...prev,
-      [role]: { name: currentUser?.name || 'System Admin', date: new Date().toLocaleString() }
-    }));
-
-    try {
-      await signOff(glId, currentPeriodId, role);
-      router.refresh(); 
-      await loadData(); 
-    } catch (error: any) {
-      console.error("Failed to sign off:", error);
-      alert(error.message || "Database Error: Failed to save signature.");
-      await loadData(); 
-    }
-    setIsSaving(false);
+  /** Runs a server action, reports the outcome and reloads the true state. */
+  const act = async (fn: () => Promise<{ ok: boolean; error?: string; code?: string }>, success?: string) => {
+    setBusy(true); setError(null); setNotice(null);
+    const res = await fn();
+    if (!res.ok) {
+      if (handleAuthLoss(res as { ok: boolean; code?: string })) return false;
+      setError(res.error ?? "That did not work.");
+    } else if (success) setNotice(success);
+    await load();
+    setBusy(false);
+    return res.ok;
   };
 
-  const handleUnsign = async (role: 'assembler' | 'reviewer' | 'approver') => {
-    const confirmUndo = window.confirm(
-      role === 'approver' 
-      ? `WARNING: Uncleared items have already rolled forward to the next period. Undoing this signature will NOT pull them back. Continue?`
-      : `Are you sure you want to completely UNDO this signature? This will drop the workflow status.`
+  const lines = data?.lines ?? [];
+  const sorted = useMemo(() => [...lines].sort((a, b) => (a.cleared === b.cleared ? a.txnDate.localeCompare(b.txnDate) : a.cleared ? 1 : -1)), [lines]);
+  const selLines = lines.filter((l) => selected.includes(l.id));
+  const selNet = selLines.reduce((s, l) => s + l.amountCents, 0);
+  const allSelCleared = selLines.length > 0 && selLines.every((l) => l.cleared);
+  const noneSelCleared = selLines.length > 0 && selLines.every((l) => !l.cleared);
+  const periodTotal = lines.reduce((s, l) => s + l.amountCents, 0);
+  const openCount = lines.filter((l) => !l.cleared).length;
+  const reusable = useMemo(() => {
+    const m = new Map<string, { id: string; fileName: string; size: number }>();
+    lines.forEach((l) => { if (l.attachment) m.set(l.attachment.id, l.attachment); });
+    return [...m.values()];
+  }, [lines]);
+
+  if (loading) return <div className="flex h-full items-center justify-center text-slate-500"><Loader2 className="animate-spin mr-3" size={22} /> Loading account…</div>;
+  if (loadError || !data) return (
+    <div className="p-8 max-w-2xl space-y-4">
+      <ErrorBanner message={loadError ?? "This account could not be loaded."} />
+      <Link href="/" className="text-blue-600 font-medium text-sm">← Back to the balance sheet</Link>
+    </div>
+  );
+
+  const { decisions: d, signatures: sig, gl } = data;
+  const period = data.activePeriod;
+  const canSelect = d.editLines.allowed || d.attach.allowed;
+  const subLabels = gl.subNames.map((n, i) => n || `Sub ${i + 1}`);
+
+  const onUpload = async (files: FileList | null, ids: string[]) => {
+    const f = files?.[0];
+    if (!f || !ids.length) return;
+    const fd = new FormData();
+    fd.set("glId", gl.id); fd.set("expectedPeriod", period); fd.set("lineIds", JSON.stringify(ids)); fd.set("file", f);
+    await act(() => uploadAttachment(fd), `Attached ${f.name} to ${ids.length} line${ids.length === 1 ? "" : "s"}.`);
+    setSelected([]);
+  };
+
+  const runPending = async () => {
+    if (!pending) return;
+    let ok = false;
+    if (pending.kind === "sign") ok = await act(() => signOff(gl.id, pending.step, period), `${STEP_TITLE[pending.step]} signed.`);
+    if (pending.kind === "reject") ok = await act(() => rejectReconciliation(gl.id, pending.level, reason, period), "Rejected and sent back.");
+    if (pending.kind === "reopen") ok = await act(() => reopenPeriod(gl.id, reason, period), "Period reopened.");
+    if (ok) { setPending(null); setReason(""); setConfirmChecked(false); }
+  };
+
+  const disabledTitle = (dec: Decision) => (dec.allowed ? undefined : dec.reason);
+
+  // A render function, not a component: declared inside the page, a component
+  // would be a new type on every render, so React would tear down and rebuild
+  // all three panels each time - losing focus and swallowing clicks that land
+  // mid-update.
+  const renderBlock = (step: "assembler" | "reviewer" | "approver", icon: React.ReactNode) => {
+    const s = sig[step];
+    const n = step === "assembler" ? 1 : step === "reviewer" ? 2 : 3;
+    const undo = step === "approver" ? null : d.unsign[step];
+    const reject = step === "assembler" ? null : d.reject[step];
+    return (
+      <div key={step} className={`p-6 flex flex-col items-center text-center ${s ? "bg-emerald-50/40" : ""}`}>
+        <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-3 ${s ? "bg-emerald-100 text-emerald-600" : "bg-slate-100 text-slate-400"}`}>{icon}</div>
+        <h3 className="font-bold text-slate-900 mb-1">{n}. {STEP_TITLE[step]}</h3>
+        {s ? (
+          <div className="text-sm text-slate-600">
+            <p className="font-medium text-emerald-700 flex items-center justify-center gap-1.5"><CheckCircle2 size={14} /> Signed</p>
+            <p className="font-bold">{s.name}</p>
+            <p className="text-xs text-slate-400 mt-0.5">{formatDateTime(s.at)}</p>
+            {undo?.allowed && (
+              <button disabled={busy} onClick={() => act(() => undoSignOff(gl.id, step as "assembler" | "reviewer", period), "Signature removed.")}
+                className="mt-2 text-xs font-semibold text-rose-600 hover:text-rose-800 inline-flex items-center gap-1"><Undo2 size={12} /> Undo my sign-off</button>
+            )}
+          </div>
+        ) : (
+          <div className="w-full mt-1 space-y-2">
+            <div className="flex gap-2">
+              <button disabled={busy || !d.sign[step].allowed} title={disabledTitle(d.sign[step])}
+                onClick={() => { setPending({ kind: "sign", step }); setConfirmChecked(false); }}
+                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold py-2 rounded-lg disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed">
+                Sign off
+              </button>
+              {reject && reject.allowed && (
+                <button disabled={busy} onClick={() => { setPending({ kind: "reject", level: step as "reviewer" | "approver" }); setReason(""); }}
+                  title="Reject and send back" className="bg-rose-50 hover:bg-rose-100 text-rose-700 px-3 rounded-lg border border-rose-200"><XCircle size={18} /></button>
+              )}
+            </div>
+            {!d.sign[step].allowed && <p className="text-[11px] font-medium text-slate-500">{d.sign[step].reason}</p>}
+          </div>
+        )}
+      </div>
     );
-    
-    if (!confirmUndo) return;
-
-    setIsSaving(true);
-    setSignatures((prev: any) => ({
-      ...prev,
-      [role]: null
-    }));
-
-    try {
-      await unsign(glId, currentPeriodId, role);
-      router.refresh();
-      await loadData(); 
-    } catch (error) {
-      console.error("Failed to unsign:", error);
-      alert("Failed to undo sign-off.");
-      await loadData();
-    }
-    setIsSaving(false);
   };
-
-  const handleReject = async (level: 'reviewer' | 'approver') => {
-    const confirmReject = window.confirm(`Are you sure you want to REJECT this ledger? This will erase previous signatures.`);
-    if (!confirmReject) return;
-
-    setIsSaving(true);
-    try {
-      await rejectWorkflow(glId, currentPeriodId, level);
-      await loadData(); 
-      router.refresh(); 
-    } catch (error) {
-      console.error("Failed to reject:", error);
-    }
-    setIsSaving(false);
-  };
-
-  const toggleHistoryAccordion = (periodId: string) => {
-    setExpandedHistory(prev => prev.includes(periodId) ? prev.filter(p => p !== periodId) : [...prev, periodId]);
-  };
-  
-  const handleSelectRow = (id: string) => setSelectedRowIds(prev => prev.includes(id) ? prev.filter(rId => rId !== id) : [...prev, id]);
-  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => e.target.checked ? setSelectedRowIds(currentRows.map(r => r.id)) : setSelectedRowIds([]);
-
-  const handleBulkUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    
-    setIsSaving(true);
-    setCurrentRows(prev => prev.map(row => selectedRowIds.includes(row.id) ? { ...row, file: file.name } : row));
-    try {
-      const payload = selectedRowIds.map(id => ({ id, file: file.name }));
-      await saveAdjustments(payload);
-    } catch (err) { console.error(err); }
-    setIsSaving(false);
-  };
-
-  const handleSingleUpload = async (id: string, e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    
-    setIsSaving(true);
-    setCurrentRows(prev => prev.map(row => row.id === id ? { ...row, file: file.name } : row));
-    try {
-      await saveAdjustments([{ id, file: file.name }]);
-    } catch (err) { console.error(err); }
-    setIsSaving(false);
-  };
-
-  const handleShareExistingFile = async () => {
-    if (!fileToShare) return;
-    
-    setIsSaving(true);
-    setCurrentRows(prev => prev.map(row => selectedRowIds.includes(row.id) ? { ...row, file: fileToShare } : row));
-    try {
-      const payload = selectedRowIds.map(id => ({ id, file: fileToShare }));
-      await saveAdjustments(payload);
-    } catch (err) { console.error(err); }
-    setIsSaving(false);
-  };
-
-  const handleViewFile = (fileName: string) => {
-    alert(`In a production environment, clicking this would open [${fileName}] securely from your connected AWS S3 bucket or cloud storage!`);
-  };
-
-  const handleSaveAdjustments = async () => {
-    setIsSaving(true);
-    try {
-      const payload = currentRows.map(row => ({ id: row.id, file: row.file || null }));
-      await saveAdjustments(payload);
-      router.refresh(); 
-      await loadData(); 
-    } catch (error) {
-      console.error("Failed to save adjustments", error);
-    }
-    setIsSaving(false);
-  };
-
-  const handleToggleCleared = async (clearedStatus: boolean) => {
-    setIsSaving(true);
-    try {
-      const payload = currentRows.map(row => ({ id: row.id, file: row.file || null }));
-      await saveAdjustments(payload);
-
-      await toggleClearedStatus(selectedRowIds, clearedStatus);
-      router.refresh(); 
-      await loadData();
-      setSelectedRowIds([]); 
-    } catch (error) {
-      console.error("Failed to toggle cleared status", error);
-    }
-    setIsSaving(false);
-  };
-
-  const isAdmin = currentUser?.role === 'ADMIN' || currentUser?.role === 'SUPER_ADMIN';
-  const canAssemble = isAdmin || currentUser?.role === 'ASSEMBLER';
-  const canReview = isAdmin || currentUser?.role === 'REVIEWER';
-  const canApprove = isAdmin || currentUser?.role === 'APPROVER';
-
-  if (loading) return <div className="flex h-screen items-center justify-center text-slate-500"><Loader2 className="animate-spin mr-3" size={24} /> Loading Ledger Data...</div>;
 
   return (
-    <div className="p-8 max-w-[1600px] mx-auto space-y-8 bg-slate-50 min-h-full">
-      
-      {/* --- Header --- */}
-      <div className="flex items-center justify-between border-b border-slate-200 pb-4">
-        <div className="flex items-center gap-4">
-          <Link href="/" className="text-blue-600 hover:text-blue-800 font-medium text-sm flex items-center gap-1">
-            ← Back to Ledger
-          </Link>
-          <h1 className="text-2xl font-bold text-slate-900">Account Details</h1>
-        </div>
-        
-        <button 
-          onClick={handleSaveAdjustments}
-          disabled={isSaving || !!signatures.approver}
-          className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white font-medium py-2 px-6 rounded-lg transition-colors shadow-sm flex items-center gap-2"
-        >
-          {isSaving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
-          {isSaving ? 'Saving...' : 'Save Adjustments'}
-        </button>
+    <div className="p-6 md:p-8 max-w-[1600px] mx-auto space-y-6">
+      <div className="flex flex-wrap items-center gap-4 border-b border-slate-200 pb-4">
+        <Link href="/" className="text-blue-600 hover:text-blue-800 font-medium text-sm">← Balance sheet</Link>
+        <h1 className="text-2xl font-bold text-slate-900">
+          <span className="font-mono">{gl.id}</span> <span className="text-slate-500 font-semibold">{gl.description}</span>
+        </h1>
       </div>
 
-      {/* --- Top Form Fields --- */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-        <div className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Entity</label>
-            <input type="text" value={accountData ? `${accountData.entityCode} - ${accountData.entity?.name}` : "Unknown Entity"} disabled className="w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 text-slate-700 outline-none cursor-not-allowed" />
-          </div>
-          <div className="flex gap-4">
-            <div className="flex-1">
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">GL Number</label>
-              <input type="text" value={glId} disabled className="w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 font-mono font-medium text-slate-900 outline-none cursor-not-allowed" />
-            </div>
-            <div className="flex-1">
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 flex justify-between">
-                <span>GL Amount</span>
-                <span className="text-blue-600">(All-Time)</span>
-              </label>
-              <input type="text" value={`$${currentPeriodTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}`} disabled className="w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 font-mono font-medium text-slate-900 outline-none cursor-not-allowed" />
-            </div>
-          </div>
-        </div>
+      <ErrorBanner message={error} onClose={() => setError(null)} />
+      <SuccessBanner message={notice} onClose={() => setNotice(null)} />
+      {data.me.isReadOnly && <div className="bg-slate-100 border border-slate-200 rounded-xl p-3 text-sm text-slate-600 flex gap-2"><Lock size={16} /> Your account is read-only. You can view this reconciliation but not change it.</div>}
 
-        <div className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">GL Description</label>
-            <input type="text" value={accountData?.description || "Unknown Description"} disabled className="w-full border border-slate-200 rounded-lg p-2.5 bg-slate-50 text-slate-700 outline-none cursor-not-allowed" />
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        {[
+          ["Entity", `${gl.entityCode} · ${gl.entityName}`],
+          ["Current period", formatPeriod(period)],
+          ["Closed through", formatPeriod(data.lastClosed, "long", "Never closed")],
+          ["Period balance", formatCents(periodTotal)],
+          ["Open items", `${openCount} of ${lines.length}`],
+        ].map(([k, v]) => (
+          <div key={k} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">{k}</p>
+            <p className="text-sm md:text-base font-bold text-slate-900 mt-1 truncate" title={v}>{v}</p>
           </div>
-          <div className="flex gap-4">
-            <div className="flex-1">
-              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Current Period</label>
-              <input type="text" value={formatPeriod(currentPeriodId)} disabled className="w-full border border-slate-200 rounded-lg p-2.5 bg-blue-50/50 text-blue-800 font-bold outline-none cursor-not-allowed" />
-            </div>
-            <div className="flex-1">
-              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">Reconciliation Status</label>
-              <div className={`w-full border rounded-lg p-2.5 font-bold flex items-center gap-2 ${
-                derivedStatus === 'Completed' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' :
-                derivedStatus === 'In Progress' ? 'bg-amber-50 border-amber-200 text-amber-700' :
-                'bg-slate-50 border-slate-200 text-slate-500'
-              }`}>
-                {derivedStatus === 'Completed' && <CheckCircle2 size={18} />}
-                {derivedStatus === 'In Progress' && <Clock size={18} />}
-                {derivedStatus === 'Pending' && <Lock size={18} />}
-                {derivedStatus}
-              </div>
-            </div>
-          </div>
-        </div>
+        ))}
       </div>
 
-      {/* --- WORKFLOW TRACKER WIDGET --- */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-          <h2 className="text-sm font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
-            <ShieldCheck size={18} className="text-blue-600" /> Period Sign-Off Workflow
-          </h2>
+        <div className="bg-slate-50 px-6 py-3 border-b border-slate-200 flex items-center justify-between">
+          <h2 className="text-sm font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2"><ShieldCheck size={18} className="text-blue-600" /> {formatPeriod(period)} sign-off</h2>
+          <span className={`text-xs font-bold ${data.clearedNetCents === 0 ? "text-emerald-700" : "text-rose-600"}`}>Cleared items net {formatCents(data.clearedNetCents)}</span>
         </div>
-        
         <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-slate-100">
-          
-          {/* ASSEMBLY BLOCK */}
-          <div className={`p-6 flex flex-col items-center text-center transition-colors ${signatures.assembler ? 'bg-emerald-50/30' : ''}`}>
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-3 ${signatures.assembler ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}><UserCheck size={24} /></div>
-            <h3 className="font-bold text-slate-900 mb-1">1. Assembly</h3>
-            {signatures.assembler ? (
-              <div className="text-sm text-slate-600 flex flex-col items-center">
-                <p className="font-medium text-emerald-700 flex items-center justify-center gap-1.5 mb-0.5"><CheckCircle2 size={14}/> Signed off</p>
-                <p className="font-bold">{signatures.assembler.name}</p>
-                <p className="text-xs text-slate-400 mt-1 mb-2">{signatures.assembler.date}</p>
-                {!signatures.reviewer && canAssemble && (
-                  <button onClick={() => handleUnsign('assembler')} disabled={isSaving} className="text-xs font-semibold text-rose-500 hover:text-rose-700 transition-colors">Undo Sign-Off</button>
-                )}
-              </div>
-            ) : (
-              <div className="mt-2 w-full">
-                {canAssemble ? (
-                  <div className="flex flex-col gap-1.5">
-                    <button 
-                      onClick={() => handleSignOff('assembler')} 
-                      disabled={isSaving || !isClearedNetZero} 
-                      className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {isSaving ? 'Signing...' : 'Sign Off as Assembler'}
-                    </button>
-                    {!isClearedNetZero && (
-                      <span className="text-[10px] text-rose-600 font-bold uppercase tracking-wider text-center bg-rose-50 py-1 rounded border border-rose-100">
-                        Cleared Items Must Net to $0.00
-                      </span>
-                    )}
-                  </div>
-                ) : <p className="text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-100 py-2 rounded-lg">Awaiting Assembler</p>}
-              </div>
-            )}
-          </div>
+          {renderBlock("assembler", <UserCheck size={22} />)}
+          {renderBlock("reviewer", <UserCheck size={22} />)}
+          {renderBlock("approver", <ShieldCheck size={22} />)}
+        </div>
+        <p className="px-6 py-2.5 text-[11px] text-slate-500 border-t border-slate-100 bg-slate-50/60">Each step must be signed by a different person. Final approval locks the period and rolls open items into {formatPeriod(nextPeriod(period))}.</p>
+      </div>
 
-          {/* REVIEW BLOCK */}
-          <div className={`p-6 flex flex-col items-center text-center transition-colors ${signatures.reviewer ? 'bg-emerald-50/30' : ''}`}>
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-3 ${signatures.reviewer ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}><UserCheck size={24} /></div>
-            <h3 className="font-bold text-slate-900 mb-1">2. Review</h3>
-            {signatures.reviewer ? (
-              <div className="text-sm text-slate-600 flex flex-col items-center">
-                <p className="font-medium text-emerald-700 flex items-center justify-center gap-1.5 mb-0.5"><CheckCircle2 size={14}/> Signed off</p>
-                <p className="font-bold">{signatures.reviewer.name}</p>
-                <p className="text-xs text-slate-400 mt-1 mb-2">{signatures.reviewer.date}</p>
-                {!signatures.approver && canReview && (
-                  <button onClick={() => handleUnsign('reviewer')} disabled={isSaving} className="text-xs font-semibold text-rose-500 hover:text-rose-700 transition-colors">Undo Sign-Off</button>
-                )}
-              </div>
-            ) : (
-              <div className="mt-2 w-full">
-                {!signatures.assembler ? <p className="text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-50 border border-slate-100 py-2 rounded-lg">Locked</p> : canReview ? (
-                  <div className="flex gap-2 w-full">
-                    <button onClick={() => handleSignOff('reviewer')} disabled={isSaving} className="flex-1 bg-amber-500 hover:bg-amber-600 text-white text-sm font-medium py-2 rounded-lg transition-colors shadow-sm disabled:opacity-50">{isSaving ? 'Signing...' : 'Sign Off'}</button>
-                    <button onClick={() => handleReject('reviewer')} className="bg-rose-100 hover:bg-rose-200 text-rose-700 text-sm font-medium px-3 py-2 rounded-lg shadow-sm"><XCircle size={18} /></button>
-                  </div>
-                ) : <p className="text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-100 py-2 rounded-lg">Awaiting Reviewer</p>}
-              </div>
-            )}
-          </div>
+      {data.futureCount > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-sm text-blue-800">
+          {data.futureCount} line{data.futureCount === 1 ? " is" : "s are"} already imported for later periods. They appear here once {formatPeriod(period)} is approved.
+        </div>
+      )}
 
-          {/* APPROVAL BLOCK */}
-          <div className={`p-6 flex flex-col items-center text-center transition-colors ${signatures.approver ? 'bg-emerald-50/30' : ''}`}>
-            <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-3 ${signatures.approver ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}><ShieldCheck size={24} /></div>
-            <h3 className="font-bold text-slate-900 mb-1">3. Final Approval</h3>
-            {signatures.approver ? (
-              <div className="text-sm text-slate-600 flex flex-col items-center">
-                <p className="font-medium text-emerald-700 flex items-center justify-center gap-1.5 mb-0.5"><CheckCircle2 size={14}/> Account Locked</p>
-                <p className="font-bold">{signatures.approver.name}</p>
-                <p className="text-xs text-slate-400 mt-1 mb-2">{signatures.approver.date}</p>
-                {canApprove && (
-                   <button onClick={() => handleUnsign('approver')} disabled={isSaving} className="text-xs font-semibold text-rose-500 hover:text-rose-700 transition-colors">Unlock Account</button>
-                )}
-              </div>
-            ) : (
-              <div className="mt-2 w-full">
-                {!signatures.reviewer ? <p className="text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-50 border border-slate-100 py-2 rounded-lg">Locked</p> : canApprove ? (
-                  <div className="flex gap-2 w-full">
-                    <button onClick={() => handleSignOff('approver')} disabled={isSaving} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold py-2 rounded-lg transition-colors shadow-sm disabled:opacity-50">{isSaving ? 'Signing...' : 'Authorize'}</button>
-                    <button onClick={() => handleReject('approver')} className="bg-rose-100 hover:bg-rose-200 text-rose-700 text-sm font-medium px-3 py-2 rounded-lg shadow-sm"><XCircle size={18} /></button>
-                  </div>
-                ) : <p className="text-xs font-bold text-slate-400 uppercase tracking-wider bg-slate-100 py-2 rounded-lg">Awaiting Approver</p>}
-              </div>
-            )}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+        <div className="px-5 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-bold text-slate-900">Lines in {formatPeriod(period)}</h2>
+          <div className="text-xs text-slate-500 flex items-center gap-3">
+            {!d.editLines.allowed && <span className="inline-flex items-center gap-1"><Lock size={12} /> {d.editLines.reason}</span>}
+            <button onClick={() => setShowSubs((v) => !v)} className="font-semibold text-blue-600 hover:text-blue-800">{showSubs ? "Hide" : "Show"} sub-accounts</button>
           </div>
+        </div>
+
+        {selected.length > 0 && (
+          <div className="bg-blue-600 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-4 text-sm">
+              <span><b>{selected.length}</b> selected</span>
+              <span>Net <span className={`font-mono font-bold px-2 py-0.5 rounded ${selNet === 0 ? "bg-emerald-500" : "bg-blue-800"}`}>{formatCents(selNet)}</span></span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={() => setSelected([])} className="text-sm text-blue-100 hover:text-white mr-1">Cancel</button>
+              {d.editLines.allowed && allSelCleared && (
+                <button disabled={busy} onClick={async () => { if (await act(() => setCleared(gl.id, selected, false, period), "Lines un-cleared.")) setSelected([]); }}
+                  className="bg-amber-500 hover:bg-amber-400 px-3 py-1.5 rounded-md text-sm font-bold flex items-center gap-1.5"><MinusSquare size={15} /> Un-clear</button>
+              )}
+              {d.editLines.allowed && noneSelCleared && (
+                <button disabled={busy || selNet !== 0} title={selNet !== 0 ? "Selected lines must net to $0.00" : undefined}
+                  onClick={async () => { if (await act(() => setCleared(gl.id, selected, true, period), "Lines cleared.")) setSelected([]); }}
+                  className="bg-emerald-500 hover:bg-emerald-400 disabled:bg-slate-400 disabled:cursor-not-allowed px-3 py-1.5 rounded-md text-sm font-bold flex items-center gap-1.5"><CheckSquare size={15} /> Mark cleared</button>
+              )}
+              {d.attach.allowed && (
+                <>
+                  <label className={`cursor-pointer bg-white text-blue-700 hover:bg-blue-50 px-3 py-1.5 rounded-md text-sm font-bold flex items-center gap-1.5 ${busy ? "opacity-50 pointer-events-none" : ""}`}>
+                    <UploadCloud size={15} /> Attach file
+                    <input type="file" className="hidden" onChange={(e) => { onUpload(e.target.files, selected); e.target.value = ""; }} />
+                  </label>
+                  {reusable.length > 0 && (
+                    <select disabled={busy} value="" onChange={async (e) => { if (e.target.value && await act(() => linkAttachment(gl.id, e.target.value, selected, period), "Support applied.")) setSelected([]); }}
+                      className="bg-white/20 text-white text-sm font-bold rounded-md px-2 py-1.5 outline-none">
+                      <option value="" className="text-slate-900">Apply existing file…</option>
+                      {reusable.map((a) => <option key={a.id} value={a.id} className="text-slate-900">{a.fileName}</option>)}
+                    </select>
+                  )}
+                  {selLines.some((l) => l.attachment || l.legacyFileName) && (
+                    <button disabled={busy} onClick={async () => { if (await act(() => removeAttachment(gl.id, selected, period), "Support removed.")) setSelected([]); }}
+                      className="bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-md text-sm font-bold">Remove support</button>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="overflow-x-auto">
+          <table className={`w-full text-sm text-left ${showSubs ? "min-w-[1900px]" : "min-w-[1000px]"}`}>
+            <thead className="text-xs text-slate-500 uppercase font-semibold border-b border-slate-200 bg-slate-50">
+              <tr>
+                <th className="p-3 w-10 text-center">
+                  <input type="checkbox" aria-label="Select all" disabled={!canSelect || !lines.length}
+                    checked={lines.length > 0 && selected.length === lines.length}
+                    onChange={(e) => setSelected(e.target.checked ? lines.map((l) => l.id) : [])} className="w-4 h-4" />
+                </th>
+                <th className="p-3 w-28">Date</th>
+                <th className="p-3 w-40">Reference</th>
+                <th className="p-3">Description</th>
+                <th className="p-3 w-36 text-right">Amount</th>
+                {showSubs && subLabels.map((s, i) => <th key={i} className="p-3 w-28 bg-blue-50/40 text-blue-800">{s}</th>)}
+                <th className="p-3 w-64">Support</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {!lines.length && <tr><td colSpan={showSubs ? 16 : 6} className="p-8 text-center text-slate-500 italic">No lines in {formatPeriod(period)}. Import activity to populate this period.</td></tr>}
+              {sorted.map((l) => {
+                const isSel = selected.includes(l.id);
+                return (
+                  <tr key={l.id} className={isSel ? "bg-blue-50/60" : l.cleared ? "bg-slate-50/70 text-slate-500" : "hover:bg-slate-50/50"}>
+                    <td className="p-3 text-center">
+                      <input type="checkbox" aria-label={`Select line ${l.reference ?? l.id}`} disabled={!canSelect} checked={isSel}
+                        onChange={() => setSelected((s) => (s.includes(l.id) ? s.filter((x) => x !== l.id) : [...s, l.id]))} className="w-4 h-4" />
+                    </td>
+                    <td className="p-3">
+                      <span className="font-mono text-xs">{formatTxnDate(l.txnDate)}</span>
+                      <div className="flex gap-1 mt-1">
+                        {l.cleared && <span className="text-[9px] font-bold text-emerald-700 bg-emerald-100 border border-emerald-200 uppercase px-1.5 py-0.5 rounded">Cleared</span>}
+                        {l.rolledFrom && <span title={`Rolled forward from ${formatPeriod(l.rolledFrom)}`} className="text-[9px] font-bold text-violet-700 bg-violet-50 border border-violet-200 uppercase px-1.5 py-0.5 rounded">From {formatPeriod(l.rolledFrom, "short")}</span>}
+                      </div>
+                    </td>
+                    <td className="p-3 font-mono text-xs truncate max-w-[160px]" title={l.reference ?? ""}>{l.reference ?? "-"}</td>
+                    <td className="p-3 text-xs truncate max-w-[320px]" title={l.description ?? ""}>{l.description ?? "-"}</td>
+                    <td className={`p-3 text-right font-mono font-semibold ${l.amountCents < 0 ? "text-slate-900" : "text-emerald-700"}`}>{formatCents(l.amountCents)}</td>
+                    {showSubs && l.subs.map((s, i) => <td key={i} className="p-3 font-mono text-[11px] bg-blue-50/10">{s ?? <span className="text-slate-300">-</span>}</td>)}
+                    <td className="p-3">
+                      {l.attachment ? (
+                        <a href={fileHref(l.attachment.id)} target="_blank" rel="noopener" className="inline-flex items-center gap-1.5 text-sm text-blue-700 hover:underline max-w-[230px]">
+                          <Paperclip size={14} className="shrink-0" /> <span className="truncate">{l.attachment.fileName}</span> <span className="text-[10px] text-slate-400 shrink-0">{formatBytes(l.attachment.size)}</span>
+                        </a>
+                      ) : l.legacyFileName ? (
+                        <span title="Recorded before uploads were stored - only the file name exists. Re-attach the file." className="inline-flex items-center gap-1.5 text-xs text-amber-700">
+                          <FileWarning size={14} /> {l.legacyFileName} <span className="text-amber-500">(name only)</span>
+                        </span>
+                      ) : !l.cleared && sig.assembler ? (
+                        <span className="text-xs font-bold text-rose-600 inline-flex items-center gap-1"><AlertCircle size={13} /> Missing support</span>
+                      ) : d.attach.allowed && !l.cleared ? (
+                        <label className="cursor-pointer text-xs font-semibold text-blue-600 hover:text-blue-800 inline-flex items-center gap-1">
+                          <UploadCloud size={13} /> Attach
+                          <input type="file" className="hidden" onChange={(e) => { onUpload(e.target.files, [l.id]); e.target.value = ""; }} />
+                        </label>
+                      ) : <span className="text-xs text-slate-400">-</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
 
-      {/* --- SECTION 1: EXPANDABLE CURRENT PERIOD --- */}
-      <div className="border border-blue-200 rounded-xl overflow-hidden bg-white shadow-sm ring-1 ring-blue-50">
-        
-        {/* Current Period Accordion Header */}
-        <button 
-          onClick={() => setIsCurrentPeriodExpanded(!isCurrentPeriodExpanded)}
-          className="w-full flex items-center justify-between p-4 bg-blue-50/30 hover:bg-blue-50/50 transition-colors"
-        >
-          <div className="flex items-center gap-3">
-            {isCurrentPeriodExpanded ? <ChevronDown size={20} className="text-blue-600" /> : <ChevronRight size={20} className="text-blue-600" />}
-            <div className="text-left">
-              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                Current Period Activity
-                <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded uppercase tracking-wider font-bold border border-blue-200">Live DB Sync</span>
-              </h2>
-              <p className="text-sm text-slate-500 font-medium">{formatPeriod(currentPeriodId)}</p>
-            </div>
-          </div>
-          <div className="text-right">
-            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-0.5">2026 YTD Activity</span>
-            <span className="text-lg font-bold text-blue-600">${ytdTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
-          </div>
-        </button>
-
-        {/* Current Period Table Body */}
-        {isCurrentPeriodExpanded && (
-          <div className="border-t border-blue-100 flex flex-col relative">
-            
-            {/* BULK BANNER */}
-            {selectedRowIds.length > 0 && !signatures.approver && (
-              <div className="bg-blue-600 text-white px-4 py-2.5 flex items-center justify-between shadow-md transition-all z-10 w-full">
-                <div className="flex items-center gap-4">
-                  <div className="flex items-center gap-2">
-                    <span className="bg-white/20 px-2 py-0.5 rounded text-sm font-bold">{selectedRowIds.length}</span>
-                    <span className="text-sm font-medium">selected</span>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-bold text-slate-900">Closed periods</h2>
+          {data.me.isAdmin && data.lastClosed && (
+            <button disabled={busy || !d.reopen.allowed} title={disabledTitle(d.reopen)} onClick={() => { setPending({ kind: "reopen" }); setReason(""); }}
+              className="text-sm font-semibold text-rose-600 hover:text-rose-800 disabled:text-slate-400 disabled:cursor-not-allowed inline-flex items-center gap-1.5">
+              <RotateCcw size={14} /> Reopen {formatPeriod(data.lastClosed, "short")}
+            </button>
+          )}
+        </div>
+        {data.me.isAdmin && data.lastClosed && !d.reopen.allowed && <p className="text-xs text-slate-500">{d.reopen.reason}</p>}
+        {!data.history.length && <div className="text-sm text-slate-500 italic p-4 bg-white border border-slate-200 rounded-xl">No closed periods yet.</div>}
+        {data.history.map((h) => {
+          const open = openHistory.includes(h.periodId);
+          const total = h.lines.reduce((s, l) => s + l.amountCents, 0);
+          return (
+            <div key={h.periodId} className="border border-slate-200 rounded-xl overflow-hidden bg-white">
+              <button onClick={() => setOpenHistory((o) => (open ? o.filter((p) => p !== h.periodId) : [...o, h.periodId]))}
+                className="w-full flex items-center justify-between p-4 bg-slate-50 hover:bg-slate-100">
+                <span className="flex items-center gap-3">
+                  {open ? <ChevronDown size={18} className="text-slate-500" /> : <ChevronRight size={18} className="text-slate-500" />}
+                  <span className="font-bold text-slate-800">{formatPeriod(h.periodId)}</span>
+                  <span className="text-[10px] bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded uppercase">Approved</span>
+                  <span className="text-xs text-slate-500">{h.lines.length} cleared line{h.lines.length === 1 ? "" : "s"}</span>
+                </span>
+                <span className="font-mono font-bold text-slate-700">{formatCents(total)}</span>
+              </button>
+              {open && (
+                <div className="p-4 space-y-3 border-t border-slate-200">
+                  <div className="flex flex-wrap gap-4 text-xs text-slate-600 bg-slate-50 p-3 rounded-lg">
+                    {(["assembler", "reviewer", "approver"] as const).map((k) => (
+                      <div key={k}><b className="text-slate-700">{STEP_TITLE[k]}:</b> {h[k] ? `${h[k]!.name}, ${formatDateTime(h[k]!.at)}` : "-"}</div>
+                    ))}
                   </div>
-                  <div className="h-4 w-px bg-blue-400"></div>
-                  <div className="text-sm font-medium flex items-center gap-2">
-                    Net Total: 
-                    <span className={`font-mono font-bold px-2 py-0.5 rounded tracking-wide ${isNetZero ? 'bg-emerald-500 text-white' : 'bg-blue-800 text-blue-100'}`}>
-                      ${Math.abs(selectedNetTotal).toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </span>
-                    {isNetZero && <span className="text-[10px] bg-emerald-500 px-1.5 py-0.5 rounded uppercase tracking-wider font-bold">Perfect Match</span>}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <button onClick={() => setSelectedRowIds([])} className="text-sm text-blue-100 hover:text-white mr-2">Cancel</button>
-                  {allSelectedAreCleared ? (
-                    <button onClick={() => handleToggleCleared(false)} className="bg-amber-500 hover:bg-amber-400 text-white px-4 py-1.5 rounded-md text-sm font-bold shadow-sm transition-colors flex items-center gap-2">
-                      <MinusSquare size={16} /> Un-clear
-                    </button>
-                  ) : (
-                    <button 
-                      onClick={() => handleToggleCleared(true)} 
-                      disabled={!isNetZero || isSaving}
-                      title={!isNetZero ? "Selected items must net to $0.00 to clear" : ""}
-                      className={`px-4 py-1.5 rounded-md text-sm font-bold shadow-sm transition-colors flex items-center gap-2 ${!isNetZero ? 'bg-slate-400 text-slate-200 cursor-not-allowed opacity-70' : 'bg-emerald-500 hover:bg-emerald-400 text-white'} ${isSaving ? 'opacity-50 cursor-wait' : ''}`}
-                    >
-                      <CheckSquare size={16} /> {isSaving ? 'Saving...' : 'Mark Cleared'}
-                    </button>
-                  )}
-                  {fileToShare && (
-                    <button onClick={handleShareExistingFile} disabled={isSaving} className="bg-white/20 hover:bg-white/30 text-white px-4 py-1.5 rounded-md text-sm font-bold flex items-center gap-2 transition-colors disabled:opacity-50">
-                      <Paperclip size={16} /> Apply {fileToShare} to All Selected
-                    </button>
-                  )}
-                  <label className={`cursor-pointer bg-white text-blue-700 hover:bg-blue-50 px-4 py-1.5 rounded-md text-sm font-bold flex items-center gap-2 shadow-sm transition-colors ${isSaving ? 'opacity-50 pointer-events-none' : ''}`}>
-                    <UploadCloud size={16} />
-                    {fileToShare ? 'Upload New for All Selected' : 'Attach Backup to All Selected'}
-                    <input type="file" className="hidden" onChange={handleBulkUpload} disabled={isSaving} />
-                  </label>
-                </div>
-              </div>
-            )}
-
-            <div className="overflow-x-auto">
-              <table className={`w-full text-sm text-left transition-all duration-300 ${showSubs ? 'min-w-[2000px]' : 'min-w-[1000px]'}`}>
-                <thead className="text-xs text-slate-500 uppercase font-semibold border-b border-slate-200 bg-slate-50">
-                  <tr>
-                    <th className="p-4 w-12 text-center sticky left-0 bg-slate-50 z-20 border-r border-slate-200">
-                      <input type="checkbox" onChange={handleSelectAll} checked={selectedRowIds.length === currentRows.length && currentRows.length > 0} disabled={!!signatures.approver} className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 cursor-pointer disabled:opacity-50" />
-                    </th>
-                    <th className="p-4 w-32 sticky left-12 bg-slate-50 z-20 border-r border-slate-200">Date</th>
-                    <th className="p-4 w-40 text-amber-700">Reference</th>
-                    <th className="p-4 w-64 text-emerald-700">Description</th>
-                    <th className="p-4 w-32 text-right">Amount</th>
-                    
-                    {showSubs ? (
-                      <>
-                        <th className="p-4 w-32 bg-blue-50/50 border-l border-blue-200 text-blue-800 font-bold"><button onClick={() => setShowSubs(false)} className="flex items-center gap-1.5 hover:text-blue-600 w-full"><MinusSquare size={16} /> Sub 1</button></th>
-                        {Array.from({ length: 9 }).map((_, i) => <th key={i} className="p-4 w-32 bg-blue-50/50 text-blue-800">Sub {i + 2}</th>)}
-                      </>
-                    ) : (
-                      <th className="p-4 w-16 border-l border-slate-200 text-center bg-slate-50"><button onClick={() => setShowSubs(true)} className="inline-flex items-center justify-center text-blue-600 hover:text-blue-800 hover:bg-blue-100 p-1 rounded"><PlusSquare size={18} /></button></th>
-                    )}
-                    
-                    <th className="p-4 w-64 border-l border-slate-200">Support Attachment</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {currentRows.length === 0 && (
-                    <tr><td colSpan={17} className="p-8 text-center text-slate-500 italic">No transactions found for {formatPeriod(currentPeriodId)}. Upload a CSV to populate.</td></tr>
-                  )}
-                  {sortedRows.map((row) => {
-                    const isSelected = selectedRowIds.includes(row.id);
-                    const isCleared = row.cleared; 
-                    const isNegative = row.amount < 0;
-                    const allSubs = [row.sub1Value, row.sub2Value, row.sub3Value, row.sub4Value, row.sub5Value, row.sub6Value, row.sub7Value, row.sub8Value, row.sub9Value, row.sub10Value].filter(Boolean);
-
-                    return (
-                      <tr key={row.id} className={`transition-colors ${isSelected ? 'bg-blue-50/50' : isCleared ? 'bg-slate-50/60 opacity-70' : 'hover:bg-slate-50/50'}`}>
-                        <td className={`p-4 text-center sticky left-0 z-10 border-r border-slate-200 ${isSelected ? 'bg-blue-50' : isCleared ? 'bg-slate-50' : 'bg-white'}`}>
-                          <input type="checkbox" disabled={!!signatures.approver} checked={isSelected} onChange={() => handleSelectRow(row.id)} className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 cursor-pointer disabled:opacity-50" />
-                        </td>
-                        
-                        <td className={`p-4 sticky left-12 z-10 border-r border-slate-200 ${isSelected ? 'bg-blue-50' : isCleared ? 'bg-slate-50' : 'bg-white'}`}>
-                          <div className="flex flex-col gap-1">
-                            <span className="font-mono text-xs text-slate-700">{row.txnDate}</span>
-                            {isCleared && <span className="text-[9px] font-bold text-emerald-700 bg-emerald-100 uppercase tracking-wider px-1.5 py-0.5 rounded w-fit border border-emerald-200 flex items-center gap-1"><CheckCircle2 size={10}/> Cleared</span>}
-                          </div>
-                        </td>
-
-                        <td className="p-4"><span className={`font-mono text-xs block truncate max-w-[140px] ${isCleared ? 'text-slate-500' : 'text-slate-700'}`}>{row.reference}</span></td>
-                        <td className="p-4"><span className={`text-xs block truncate max-w-[240px] ${isCleared ? 'text-slate-500' : 'text-slate-700'}`}>{row.description}</span></td>
-                        <td className={`p-4 text-right font-mono font-medium ${isNegative ? (isCleared ? 'text-slate-600' : 'text-slate-900') : (isCleared ? 'text-emerald-600' : 'text-emerald-700')}`}>
-                          {isNegative ? `-$${Math.abs(row.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}` : `$${row.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
-                        </td>
-                        
-                        {showSubs ? (
-                          Array.from({ length: 10 }).map((_, i) => {
-                            const subVal = row[`sub${i + 1}Value` as keyof typeof row] as string;
-                            return <td key={i} className={`p-4 ${i === 0 ? 'border-l border-blue-200 bg-blue-50/10' : 'bg-blue-50/10'}`}>{subVal ? <span className="font-mono text-[10px] bg-white border border-slate-200 px-1.5 py-0.5 rounded text-slate-700 uppercase">{subVal}</span> : <span className="text-slate-300">-</span>}</td>
-                          })
-                        ) : (
-                          <td className="p-4 border-l border-slate-200 text-center">
-                            {allSubs.length > 0 ? <span className="inline-flex items-center justify-center w-6 h-6 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700 ring-1 ring-blue-200 cursor-help" title={`Mapped: ${allSubs.join(', ')}`}>{allSubs.length}</span> : <span className="text-slate-300">-</span>}
-                          </td>
-                        )}
-
-                        <td className="p-4 border-l border-slate-200">
-                          {row.file ? (
-                            <div className={`flex items-center gap-2 text-sm p-2 rounded-md border ${isCleared ? 'text-slate-600 bg-slate-100 border-slate-200' : 'text-blue-600 bg-blue-50 border-blue-100'}`}>
-                              <Paperclip size={14} className="shrink-0" />
-                              <button onClick={() => handleViewFile(row.file)} className="truncate font-medium hover:underline hover:text-blue-800 text-left" title="Click to view attachment">{row.file}</button>
-                              {!signatures.approver && !isCleared && (
-                                <button 
-                                  disabled={isSaving}
-                                  onClick={async () => {
-                                    setIsSaving(true);
-                                    setCurrentRows(prev => prev.map(r => r.id === row.id ? { ...r, file: null } : r));
-                                    try { await saveAdjustments([{ id: row.id, file: null }]); } catch(e) {}
-                                    setIsSaving(false);
-                                  }} 
-                                  className="text-blue-400 hover:text-blue-700 ml-auto p-0.5 disabled:opacity-50" title="Remove attachment"
-                                >
-                                  <XCircle size={14} />
-                                </button>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="flex flex-col gap-2 w-full">
-                              {signatures.assembler && !isCleared && <span className="text-xs font-bold text-rose-600 flex items-center gap-1 bg-rose-50 px-2 py-1 rounded border border-rose-200 w-fit"><AlertCircle size={14} /> Missing Backup</span>}
-                              {signatures.approver || isCleared ? (
-                                <span className="text-xs text-slate-400 italic flex items-center gap-1"><Lock size={12}/> Locked</span>
-                              ) : (
-                                <input type="file" disabled={isSaving} onChange={(e) => handleSingleUpload(row.id, e)} className="text-xs w-full file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 cursor-pointer transition-colors disabled:opacity-50" />
-                              )}
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* --- SECTION 2: HISTORICAL ACCORDION --- */}
-      <div className="pt-4 border-t border-slate-200">
-        <h2 className="text-lg font-bold text-slate-900 mb-4">Historical Activity (Closed Periods)</h2>
-        
-        {historicalData.length === 0 ? (
-          <div className="text-sm text-slate-500 italic p-4 bg-slate-100 rounded-lg">No historical closed periods found.</div>
-        ) : (
-          <div className="space-y-3">
-            {historicalData.map((hist) => {
-              const isExpanded = expandedHistory.includes(hist.periodId);
-              const histTotal = hist.transactions.reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0);
-              
-              return (
-                <div key={hist.periodId} className="border border-slate-200 rounded-xl overflow-hidden bg-white shadow-sm">
-                  <button 
-                    onClick={() => toggleHistoryAccordion(hist.periodId)}
-                    className="w-full flex items-center justify-between p-4 bg-slate-50 hover:bg-slate-100 transition-colors"
-                  >
-                    <div className="flex items-center gap-3">
-                      {isExpanded ? <ChevronDown size={18} className="text-slate-500" /> : <ChevronRight size={18} className="text-slate-500" />}
-                      <span className="font-bold text-slate-800">{formatPeriod(hist.periodId)}</span>
-                      <span className="text-[10px] bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded uppercase tracking-wider flex items-center gap-1"><CheckCircle2 size={12}/> Closed</span>
-                    </div>
-                    <span className="font-mono font-bold text-slate-700">
-                       ${histTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                    </span>
-                  </button>
-
-                  {isExpanded && (
-                    <div className="border-t border-slate-200 overflow-x-auto p-4 bg-white">
-                      <div className="flex gap-4 mb-4 text-xs text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-100">
-                        <div><strong className="text-slate-700">Assembled By:</strong> {hist.recon?.assembler?.name || 'Unknown'}</div>
-                        <div><strong className="text-slate-700">Reviewed By:</strong> {hist.recon?.reviewer?.name || 'Unknown'}</div>
-                        <div><strong className="text-slate-700">Approved By:</strong> {hist.recon?.approver?.name || 'Unknown'}</div>
-                      </div>
-
-                      <table className="w-full text-sm text-left">
-                        <thead className="text-xs text-slate-500 uppercase font-semibold border-b border-slate-200 bg-slate-50">
-                          <tr>
-                            <th className="p-3 w-32 border-r border-slate-200">Date</th>
-                            <th className="p-3 w-40 text-amber-700">Reference</th>
-                            <th className="p-3 w-64 text-emerald-700">Description</th>
-                            <th className="p-3 w-32 text-right">Amount</th>
-                            <th className="p-3 w-64 border-l border-slate-200">Support Attachment</th>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left min-w-[700px]">
+                      <thead className="text-slate-500 uppercase border-b border-slate-200"><tr><th className="p-2">Date</th><th className="p-2">Reference</th><th className="p-2">Description</th><th className="p-2 text-right">Amount</th><th className="p-2">Support</th></tr></thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {h.lines.map((l) => (
+                          <tr key={l.id}>
+                            <td className="p-2 font-mono">{formatTxnDate(l.txnDate)}</td><td className="p-2 font-mono">{l.reference ?? "-"}</td><td className="p-2">{l.description ?? "-"}</td>
+                            <td className="p-2 text-right font-mono">{formatCents(l.amountCents)}</td>
+                            <td className="p-2">{l.attachment ? <a href={fileHref(l.attachment.id)} target="_blank" rel="noopener" className="text-blue-700 hover:underline">{l.attachment.fileName}</a> : l.legacyFileName ? <span className="text-amber-700">{l.legacyFileName} (name only)</span> : "-"}</td>
                           </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {hist.transactions.map((row: any) => (
-                            <tr key={row.id} className="hover:bg-slate-50/50">
-                              <td className="p-3 border-r border-slate-200 font-mono text-xs text-slate-500">{row.txnDate}</td>
-                              <td className="p-3 font-mono text-xs text-slate-500">{row.reference}</td>
-                              <td className="p-3 text-xs text-slate-500">{row.description}</td>
-                              <td className="p-3 text-right font-mono font-medium text-slate-500">
-                                {row.amount < 0 ? `-$${Math.abs(row.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}` : `$${row.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}`}
-                              </td>
-                              <td className="p-3 border-l border-slate-200">
-                                {row.file ? (
-                                  <div className="flex items-center gap-2 text-sm p-1.5 rounded border text-slate-500 bg-slate-50 border-slate-200 w-fit">
-                                    <Paperclip size={14} className="shrink-0" />
-                                    <button onClick={() => handleViewFile(row.file)} className="truncate hover:underline" title="Click to view attachment">{row.file}</button>
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-slate-400 italic">No Support Attached</span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              )
-            })}
-          </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm">
+        <h2 className="px-5 py-3 border-b border-slate-200 font-bold text-slate-900 flex items-center gap-2"><History size={17} className="text-slate-500" /> Activity</h2>
+        {!data.events.length ? <p className="p-5 text-sm text-slate-500 italic">No recorded activity yet.</p> : (
+          <ul className="divide-y divide-slate-100 max-h-96 overflow-y-auto">
+            {data.events.map((e) => (
+              <li key={e.id} className="px-5 py-2.5 text-sm flex flex-wrap gap-x-2">
+                <span className="text-slate-400 text-xs w-40 shrink-0 pt-0.5">{formatDateTime(e.at)}</span>
+                <span className="text-slate-800"><b>{e.actor}</b> {EVENT_LABEL[e.action] ?? e.action.toLowerCase().replace(/_/g, " ")}{e.periodId ? ` (${formatPeriod(e.periodId, "short")})` : ""}</span>
+                {describeEvent(e) && <span className="text-slate-500">· {describeEvent(e)}</span>}
+              </li>
+            ))}
+          </ul>
         )}
       </div>
 
+      {pending?.kind === "sign" && (
+        <Modal title={`Sign off: ${STEP_TITLE[pending.step]}`} onClose={() => setPending(null)}>
+          <p className="text-sm text-slate-600">You are signing <b>{STEP_TITLE[pending.step].toLowerCase()}</b> for GL <b className="font-mono">{gl.id}</b>, {formatPeriod(period)}.</p>
+          {pending.step === "approver" && <p className="text-sm text-slate-600 mt-2">This locks the period. {openCount} open item{openCount === 1 ? "" : "s"} will roll forward into the next period.</p>}
+          <label className="mt-4 flex gap-3 items-start p-3 bg-amber-50 border border-amber-200 rounded-lg cursor-pointer">
+            <input type="checkbox" checked={confirmChecked} onChange={(e) => setConfirmChecked(e.target.checked)} className="mt-1 w-4 h-4" />
+            <span className="text-sm text-amber-900">I confirm I have reviewed all balances in this period and the supporting documentation attached to them.</span>
+          </label>
+          <div className="flex justify-end gap-2 mt-5">
+            <button onClick={() => setPending(null)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+            <button disabled={!confirmChecked || busy} onClick={runPending} className="px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 flex items-center gap-2">
+              {busy && <Loader2 size={15} className="animate-spin" />} Sign off
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {(pending?.kind === "reject" || pending?.kind === "reopen") && (
+        <Modal title={pending.kind === "reopen" ? `Reopen ${formatPeriod(data.lastClosed)}` : `Reject at ${pending.level === "reviewer" ? "review" : "final approval"}`} onClose={() => setPending(null)}>
+          <p className="text-sm text-slate-600">
+            {pending.kind === "reopen"
+              ? "This removes the final approval. The open items that rolled forward move back into that period, and the assembly and review signatures remain."
+              : pending.level === "reviewer" ? "This removes the assembly signature and sends the account back to the assembler." : "This removes the assembly and review signatures and sends the account back to the start."}
+          </p>
+          <label className="block mt-4">
+            <span className="block text-sm font-semibold text-slate-700 mb-1">Reason (recorded in the activity log)</span>
+            <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} maxLength={500}
+              className="w-full border border-slate-300 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-rose-400" />
+          </label>
+          <div className="flex justify-end gap-2 mt-5">
+            <button onClick={() => setPending(null)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+            <button disabled={reason.trim().length < 5 || busy} onClick={runPending} className="px-4 py-2 text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-lg disabled:opacity-50 flex items-center gap-2">
+              {busy && <Loader2 size={15} className="animate-spin" />} {pending.kind === "reopen" ? "Reopen period" : "Reject"}
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

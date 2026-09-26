@@ -1,0 +1,12 @@
+# Never bake secrets or local state into the image.
+.env
+.env.*
+node_modules
+.next
+storage
+public/uploads
+*.bak
+.DS_Store
+**/.DS_Store
+Dockerfile
+.dockerignore

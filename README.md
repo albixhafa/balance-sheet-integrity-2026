@@ -1,58 +1,74 @@
 # 📊 Balance Sheet Integrity
 
-A production-ready, full-stack financial balance sheet and reconciliation application. Built for secure, scalable financial tracking, this app allows teams to import General Ledger (GL) activity, attach supporting documentation, and manage reconciliation workflows seamlessly. (Demo: albixhafa.com/balancesheet)
+A full-stack balance sheet reconciliation application. Teams import General Ledger (GL) activity, clear line items against supporting documentation, and sign off each account through a three-step review with a complete audit trail. (Demo: albixhafa.com/balancesheet)
 
 ## ✨ Core Functionality
 
 ### 🔐 Secure Authentication & User Profiles
-* **Access Control:** Dedicated, role-based login system to access the reconciliation portal.
-* **Profile Management:** Users can view their specific access levels (e.g., Data Entry & Assembly) and track exactly which entities they manage.
-* **Security Enforcement:** The system automatically detects temporary or compromised passwords and intercepts the user, forcing a secure password change before granting access.
+* **Server-side sessions:** Sign-in issues a random session token; only its hash is stored. Sessions expire after 8 hours (1 hour idle), and deactivating a user or resetting their password signs them out immediately.
+* **Account protection:** Accounts lock after repeated failed sign-ins. Passwords must be 10+ characters and are hashed with bcrypt.
+* **Profile Management:** Users see their role, their access level and the entities they are assigned to.
+* **Forced password change:** Temporary or reset passwords must be replaced before the user can reach anything else.
 
 ### 📥 Strict GL Activity Import
-* **Role-Restricted Uploads:** The drag-and-drop CSV import tool is strictly restricted to Assembly and Admin users. 
-* **Data Validation:** Enforces a strict 17-column format requiring precise data, including 8-digit transaction dates, exact entity codes, and up to 10 sub-account dimensions.
-* **Ledger Protection:** Actively prevents data corruption by rejecting imports into periods that are already closed and fully approved.
-* **Audit Feedback:** Provides immediate success metrics detailing rows inserted, duplicates skipped, and any formatting errors.
+* **Role-Restricted Uploads:** CSV import is limited to Assembly and Admin users, for the entities they are assigned to.
+* **Server-side validation:** Enforces the 17-column format (8-digit dates, exact entity codes, up to 10 sub-account dimensions) and parses amounts exactly, including thousands separators and negatives in parentheses.
+* **All-or-nothing:** A file either loads completely or not at all, with a list of every rejected row and why. Duplicates are skipped and reported.
+* **Ledger Protection:** Imports into periods that are already approved are refused.
 
 ### ✍️ 3-Tier Reconciliation Workflow
-* **Reconciliation Dashboard:** Top-down view of all assigned entities, tracking the active period, last closed period, and current balances.
-* **Line-Item Management:** Users can mark specific transactions as cleared and directly upload supporting documentation (receipts, invoices) to individual line items.
-* **Staged Approvals:** Enforces a rigid, locked step-by-step workflow: 1. Assembly, 2. Review, and 3. Final Approval.
-* **Verification Prompts:** Before any stage is signed off, the user must pass a final verification prompt legally confirming they have reviewed all balances and attached support.
-* **Rejection Handling:** Approvers have the authority to reject a ledger, which immediately erases previous signatures and kicks the workflow back. 
+* **Reconciliation Dashboard:** All assigned entities with the active period, last approved period and current balances. Close Status shows real progress across every GL.
+* **Line-Item Management:** Mark transactions as cleared and attach supporting documents (PDF, images, Office files, CSV, email; up to 10 MB). Files are stored privately and only served to users with access to that entity.
+* **Staged Approvals:** 1. Assembly, 2. Review, 3. Final Approval, in order, by **three different people**. Admins can stand in for any role, but still sign only one step per reconciliation.
+* **Verification Prompts:** Each sign-off requires confirming that balances and support have been reviewed.
+* **Rejection Handling:** Reviewers and approvers can reject with a required reason, which clears the signatures and sends the account back to Assembly.
+* **Reopen:** Admins can reopen an approved period with a reason; items that were rolled forward move back.
+* **Activity history:** Every account shows who did what and when.
 
 ### ⚙️ Comprehensive Administration Panel
-* **User Management:** Admins can create new users, define roles (Assembler, Reviewer, Approver), edit access, and instantly deactivate accounts.
-* **Password Resets:** Admins can trigger password resets for locked-out users, automatically generating secure temporary passwords. 
-* **Entity & GL Architecture:** Build the financial structure from scratch, creating new entities with specific 6-character codes. 
-* **Dimension Configuration:** Configure up to 10 custom sub-account dimensions when assigning a new General Ledger account. 
-* **Structural Integrity:** Because structural changes to the ledger are permanent, the system requires final verification before any new entity or GL is committed to the database.
+* **User Management:** Create users, set roles (Assembler, Reviewer, Approver, Admin), assign entities, set read-only access, and deactivate accounts.
+* **Password Resets:** Unlock users and issue cryptographically random temporary passwords for any account.
+* **Entity & GL Architecture:** Create entities (6-character codes) and GL accounts with up to 10 sub-account dimensions; edit descriptions and deactivate them later.
+* **Audit Log:** Every change (sign-ins, sign-offs, rejections, imports, attachments, admin actions) is recorded in an append-only log.
+
+### 🛡️ Integrity Guarantees
+* Every action is authorised on the server: role, entity assignment and read-only status are checked on each request, never trusted from the browser.
+* Workflow rules live in a single function used both to show buttons and to authorise the action, so the UI and the server cannot disagree.
+* Money is stored and summed as integer cents.
+* Changes to an account are serialised with a per-GL database lock, so two people acting at the same moment cannot both win.
+* Each change and its audit entry are written in the same transaction.
 
 ---
 
 ## 🛠️ Tech Stack
-* **Framework:** Next.js (App Router)
-* **Database:** PostgreSQL
-* **Authentication:** NextAuth.js
-* **Storage:** S3-Compatible API (AWS, Linode Object Storage, etc.)
-* **Deployment:** Docker & Docker Compose (Local & Production ready)
-* **Reverse Proxy:** Nginx (for production environments)
+* **Framework:** Next.js 16 (App Router, Server Actions)
+* **Database:** PostgreSQL with Prisma 7
+* **Authentication:** Custom server-side sessions (bcrypt, hashed session tokens, HttpOnly cookies)
+* **Storage:** Private file volume for attachments, served through an access-checked route
+* **Deployment:** Docker (multi-stage image, non-root) & Docker Compose
+* **Reverse Proxy:** Nginx (TLS termination in production)
 
 ---
 
 ## 🚀 Quickstart (Local Development)
 
-The easiest way to run this application locally is by using the included Docker development environment. You must have Docker installed on your machine.
-
-Copy and paste this entire block into your terminal to clone the repo, setup the environment, and start the app:
+Requires Docker.
 
 ```bash
-git clone [https://github.com/albixhafa/balance-sheet-integrity-2026.git](https://github.com/albixhafa/balance-sheet-integrity-2026.git)
+git clone https://github.com/albixhafa/balance-sheet-integrity-2026.git
 cd balance-sheet-integrity-2026
-cp .env.example .env
-docker compose -f docker-compose.local.yml up -d
+cp .env.example .env   # then set POSTGRES_PASSWORD
+docker compose -f docker-compose.local.yml up -d --build
 ```
+
+Create the first admin (prints a one-time password you will replace at first sign-in):
+
+```bash
+docker compose -f docker-compose.local.yml exec app sh -c 'ADMIN_EMAIL=you@example.com node scripts/create-admin.mjs'
+```
+
+Then open http://localhost:3000/balancesheet.
+
 ![Screenshot 1](images/Screenshot1.png)
 ![Screenshot 2](images/Screenshot2.png)
 ![Screenshot 3](images/Screenshot3.png)
