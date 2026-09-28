@@ -190,7 +190,7 @@ export default function AccountPage() {
               <p className="text-xs text-stone-500">{formatDateTime(s.at)}</p>
               {undo?.allowed && (
                 <button disabled={busy} onClick={() => act(() => undoSignOff(gl.id, step as "assembler" | "reviewer", period), "Signature removed.")}
-                  className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-stone-500 hover:text-rose-700"><Undo2 size={12} /> Undo my sign-off</button>
+                  className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-stone-500 hover:text-rose-700"><Undo2 size={12} /> {s.name === data.me.name ? "Undo my sign-off" : "Undo sign-off"}</button>
               )}
             </div>
           ) : (

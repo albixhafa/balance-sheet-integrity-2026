@@ -69,43 +69,39 @@ docker compose -f docker-compose.local.yml exec app sh -c 'ADMIN_EMAIL=you@examp
 
 Then open http://localhost:3000/balancesheet.
 
-![Screenshot 1](images/Screenshot1.png)
-![Screenshot 2](images/Screenshot2.png)
-![Screenshot 3](images/Screenshot3.png)
-![Screenshot 4](images/Screenshot4.png)
-![Screenshot 5](images/Screenshot5.png)
-![Screenshot 5.1](images/Screenshot5.1.png)
-![Screenshot 6](images/Screenshot6.png)
-![Screenshot 7](images/Screenshot7.png)
-![Screenshot 8](images/Screenshot8.png)
-![Screenshot 9](images/Screenshot9.png)
-![Screenshot 10](images/Screenshot10.png)
-![Screenshot 11](images/Screenshot11.png)
-![Screenshot 12](images/Screenshot12.png)
-![Screenshot 13](images/Screenshot13.png)
-![Screenshot 14](images/Screenshot14.png)
-![Screenshot 15](images/Screenshot15.png)
-![Screenshot 16](images/Screenshot16.png)
-![Screenshot 17](images/Screenshot17.png)
-![Screenshot 18](images/Screenshot18.png)
-![Screenshot 19](images/Screenshot19.png)
-![Screenshot 20](images/Screenshot20.png)
-![Screenshot 21](images/Screenshot21.png)
-![Screenshot 22](images/Screenshot22.png)
-![Screenshot 23](images/Screenshot23.png)
-![Screenshot 24](images/Screenshot24.png)
-![Screenshot 25](images/Screenshot25.png)
-![Screenshot 26](images/Screenshot26.png)
-![Screenshot 27](images/Screenshot27.png)
-![Screenshot 28](images/Screenshot28.png)
-![Screenshot 29](images/Screenshot29.png)
-![Screenshot 30](images/Screenshot30.png)
-![Screenshot 31](images/Screenshot31.png)
-![Screenshot 32](images/Screenshot32.png)
-![Screenshot 32.1](images/Screenshot32.1.png)
-![Screenshot 33](images/Screenshot33.png)
-![Screenshot 34](images/Screenshot34.png)
-![Screenshot 35](images/Screenshot35.png)
-![Screenshot 36](images/Screenshot36.png)
-![Screenshot 37](images/Screenshot37.png)
-![Screenshot 38](images/Screenshot38.png)
+## 📸 Screenshots
+
+*Demo data; every name and figure is fictional.*
+
+**Balance sheet**: every GL account for an entity with its period, status, open items and balance.
+![Balance sheet dashboard](images/02-dashboard.png)
+
+**Account reconciliation**: the three-step sign-off, the period's lines and their supporting documents.
+![Account reconciliation](images/03-account.png)
+
+**Clearing lines**: select lines to see their net, then clear them or attach support from the floating bar.
+![Selecting lines](images/04-selection-bar.png)
+
+**Sign-off**: each step asks for an explicit confirmation.
+![Sign-off confirmation](images/05-sign-off.png)
+
+**Close status**: where every account stands across all entities.
+![Close status](images/06-close-status.png)
+
+**Import**: preview a CSV before it is validated; nothing is saved unless every row passes.
+![Import activity](images/07-import.png)
+
+**Administration**: users, roles and entity access, plus the ledger structure and audit log.
+![Users](images/08-admin-users.png)
+![Entities and GL accounts](images/09-admin-entities.png)
+
+**Profile and sign-in**
+![Profile](images/10-profile.png)
+![Sign in](images/01-sign-in.png)
+
+**On a phone**
+
+<p>
+  <img src="images/11-mobile-dashboard.png" alt="Dashboard on a phone" width="300">
+  <img src="images/12-mobile-account.png" alt="Account on a phone" width="300">
+</p>
