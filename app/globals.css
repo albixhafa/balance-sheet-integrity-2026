@@ -1,20 +1,33 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* One neutral family (stone) for every surface, border and text colour, and a
+ * single brand hue for focus, links and the active nav item. Status colours
+ * (amber, sky, emerald, rose) are reserved for workflow meaning only. */
+@theme {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-mono-face), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-canvas: #f7f7f5;
+  --color-brand-50: #eef6f4;
+  --color-brand-100: #d5ebe5;
+  --color-brand-200: #a9d6cb;
+  --color-brand-500: #1f8a73;
+  --color-brand-600: #16735f;
+  --color-brand-700: #115c4c;
+  --color-brand-900: #0b3a30;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+@layer base {
+  html { -webkit-font-smoothing: antialiased; }
+  body {
+    background: var(--color-canvas);
+    color: var(--color-stone-900);
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection { background: var(--color-brand-100); }
+  :focus-visible { outline: 2px solid var(--color-brand-500); outline-offset: 2px; }
+  input[type="checkbox"] { accent-color: var(--color-stone-900); }
 }
 
-/* Force light mode background and text colors */
-body {
-  background-color: #f8fafc; 
-  color: #0f172a; 
-  font-family: var(--font-sans), Arial, sans-serif;
-}
+/* Money and counts: equal-width digits so columns line up. */
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum", "cv11"; }

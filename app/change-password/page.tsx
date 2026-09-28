@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Lock, ShieldAlert, Loader2 } from "lucide-react";
+import { KeyRound } from "lucide-react";
 import { completeRequiredPasswordChange, logout } from "@/app/actions/auth";
-import { handleAuthLoss } from "@/components/ui";
+import { Button, Field, ErrorBanner, handleAuthLoss, inputCls } from "@/components/ui";
 
 export default function ChangePasswordPage() {
   const [pw, setPw] = useState("");
@@ -29,34 +29,25 @@ export default function ChangePasswordPage() {
   };
 
   return (
-    <div className="min-h-full flex items-center justify-center p-6 bg-slate-50">
-      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
-        <div className="bg-amber-50 p-6 border-b border-amber-100 text-center">
-          <ShieldAlert size={32} className="text-amber-600 mx-auto mb-2" />
-          <h1 className="text-xl font-bold text-amber-900">Set a new password</h1>
-          <p className="text-sm text-amber-800 mt-1.5">You signed in with a temporary password. Choose your own before continuing.</p>
+    <div className="flex min-h-dvh flex-col items-center justify-center px-4 py-12">
+      <div className="w-full max-w-[380px]">
+        <div className="mb-8 flex flex-col items-center text-center">
+          <div className="flex size-10 items-center justify-center rounded-xl bg-amber-100 text-amber-700"><KeyRound size={20} /></div>
+          <h1 className="mt-5 text-2xl font-semibold tracking-tight text-stone-900">Set a new password</h1>
+          <p className="mt-1.5 text-sm text-stone-500">You signed in with a temporary password. Choose your own before continuing.</p>
         </div>
-        <form onSubmit={submit} className="p-6 space-y-4">
-          {error && <div role="alert" className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-sm font-medium text-rose-800">{error}</div>}
-          {[["New password", pw, setPw, "new-password"], ["Confirm new password", confirm, setConfirm, "new-password"]].map(([label, val, set, ac]) => (
-            <label key={label as string} className="block">
-              <span className="block text-sm font-semibold text-slate-700 mb-1">{label as string}</span>
-              <span className="relative block">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                <input required type="password" minLength={10} maxLength={72} autoComplete={ac as string} value={val as string}
-                  onChange={(e) => (set as (v: string) => void)(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 outline-none" />
-              </span>
-            </label>
-          ))}
-          <p className="text-xs text-slate-500">At least 10 characters. It cannot be the temporary password.</p>
-          <button type="submit" disabled={busy}
-            className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-2.5 rounded-lg flex items-center justify-center gap-2 disabled:opacity-70">
-            {busy ? <Loader2 className="animate-spin" size={18} /> : "Save and continue"}
-          </button>
-          <button type="button" onClick={async () => { await logout(); window.location.href = "/balancesheet/login"; }}
-            className="w-full text-sm text-slate-500 hover:text-slate-700">Sign out instead</button>
+        <form onSubmit={submit} className="space-y-4 rounded-2xl border border-stone-200/80 bg-white p-6 shadow-[0_1px_3px_rgba(28,25,23,0.06)]">
+          <ErrorBanner message={error || null} />
+          <Field label="New password" hint="At least 10 characters. It cannot be the temporary password.">
+            <input required type="password" minLength={10} maxLength={72} autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} className={inputCls} autoFocus />
+          </Field>
+          <Field label="Confirm new password">
+            <input required type="password" minLength={10} maxLength={72} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} className={inputCls} />
+          </Field>
+          <Button type="submit" variant="primary" loading={busy} className="w-full">Save and continue</Button>
         </form>
+        <button type="button" onClick={async () => { await logout(); window.location.href = "/balancesheet/login"; }}
+          className="mt-6 w-full text-center text-sm text-stone-500 hover:text-stone-800">Sign out instead</button>
       </div>
     </div>
   );

@@ -2,10 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Loader2, Search, ChevronRight } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { Search, ChevronRight } from "lucide-react";
 import { getCloseStatus } from "@/app/actions/ledger";
 import { formatPeriod, formatDateTime } from "@/lib/format";
-import { ErrorBanner, StageBadge, handleAuthLoss, type Stage } from "@/components/ui";
+import {
+  Page, PageHeader, Card, PageLoading, Segmented, StageBadge, ErrorBanner, handleAuthLoss,
+  inputCls, th, td, theadCls, tbodyCls, cx, STAGE_DOT, STAGE_LABEL, type Stage,
+} from "@/components/ui";
 
 type Row = {
   entityCode: string; entityName: string; glId: string; description: string; glStatus: string;
@@ -13,17 +17,15 @@ type Row = {
   assembler: { name: string; at: string | null } | null; reviewer: { name: string; at: string | null } | null;
   lastActivity: string | null;
 };
-
-const FILTERS: { key: "ALL" | Stage; label: string }[] = [
-  { key: "ALL", label: "All" }, { key: "OPEN", label: "Open" }, { key: "ASSEMBLED", label: "Awaiting review" }, { key: "REVIEWED", label: "Awaiting approval" },
-];
+type Filter = "ALL" | Stage;
 
 export default function StatusPage() {
+  const router = useRouter();
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
-  const [filter, setFilter] = useState<"ALL" | Stage>("ALL");
+  const [filter, setFilter] = useState<Filter>("ALL");
 
   useEffect(() => {
     getCloseStatus().then((res) => {
@@ -43,68 +45,80 @@ export default function StatusPage() {
     (filter === "ALL" || r.stage === filter) &&
     (!q || `${r.entityCode} ${r.entityName} ${r.glId} ${r.description}`.toLowerCase().includes(q.toLowerCase())));
 
-  if (loading) return <div className="p-8 flex items-center gap-3 text-slate-500"><Loader2 className="animate-spin" /> Loading close status…</div>;
+  if (loading) return <PageLoading label="Loading close status" />;
+
+  const total = rows.length || 1;
+  const segments: Stage[] = ["REVIEWED", "ASSEMBLED", "OPEN"];
 
   return (
-    <div className="p-6 md:p-8 max-w-[1500px] mx-auto space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">Close Status</h1>
-        <p className="text-sm text-slate-500 mt-1">Where every account you can see stands in its current period.</p>
-      </div>
+    <Page>
+      <PageHeader title="Close status" description="Where every account you can see stands in its current period." />
       <ErrorBanner message={error} />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {[["Accounts", rows.length, "text-slate-900"], ["Open", counts.OPEN, "text-slate-700"], ["Awaiting review", counts.ASSEMBLED, "text-amber-600"], ["Awaiting approval", counts.REVIEWED, "text-blue-600"]].map(([l, n, c]) => (
-          <div key={l as string} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">{l}</p>
-            <p className={`text-2xl font-bold mt-1 ${c}`}>{n as number}</p>
-          </div>
-        ))}
-      </div>
-
-      <div className="flex flex-col md:flex-row gap-3 md:items-center justify-between">
-        <div className="flex gap-1 bg-slate-200/60 p-1 rounded-lg w-fit">
-          {FILTERS.map((f) => (
-            <button key={f.key} onClick={() => setFilter(f.key)}
-              className={`px-3 py-1.5 rounded-md text-sm font-semibold ${filter === f.key ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:text-slate-900"}`}>{f.label}</button>
+      <Card className="px-5 py-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <p className="text-sm font-medium text-stone-900">{rows.length} accounts in progress</p>
+          <p className="text-[13px] text-stone-500"><span className="num font-medium text-stone-800">{counts.REVIEWED}</span> ready for final approval</p>
+        </div>
+        <div className="mt-3 flex h-2 overflow-hidden rounded-full bg-stone-100">
+          {segments.map((s) => counts[s as keyof typeof counts] > 0 && (
+            <div key={s} className={STAGE_DOT[s]} style={{ width: `${(counts[s as keyof typeof counts] / total) * 100}%` }} />
           ))}
         </div>
-        <label className="relative">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search entity, GL or description"
-            className="pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-sm w-full md:w-80 outline-none focus:ring-2 focus:ring-blue-500" />
+        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[13px] text-stone-600">
+          {segments.map((s) => (
+            <span key={s} className="inline-flex items-center gap-1.5"><span className={cx("size-2 rounded-full", STAGE_DOT[s])} /> {STAGE_LABEL[s]} <span className="num text-stone-400">{counts[s as keyof typeof counts]}</span></span>
+          ))}
+        </div>
+      </Card>
+
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <Segmented<Filter> value={filter} onChange={setFilter} options={[
+          { value: "ALL", label: "All", count: rows.length },
+          { value: "OPEN", label: "Open", count: counts.OPEN },
+          { value: "ASSEMBLED", label: "Awaiting review", count: counts.ASSEMBLED },
+          { value: "REVIEWED", label: "Awaiting approval", count: counts.REVIEWED },
+        ]} />
+        <label className="relative w-full md:w-72">
+          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search entity, GL or description" className={cx(inputCls, "pl-9")} />
         </label>
       </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-x-auto">
-        <table className="w-full text-sm text-left min-w-[1000px]">
-          <thead className="text-xs text-slate-500 uppercase font-semibold border-b border-slate-200 bg-slate-50">
-            <tr>
-              <th className="p-4">Entity</th><th className="p-4">GL</th><th className="p-4">Active Period</th><th className="p-4">Status</th>
-              <th className="p-4 text-right">Open Items</th><th className="p-4 text-right">No Support</th><th className="p-4">Signed</th><th className="p-4"></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {visible.length === 0 && <tr><td colSpan={8} className="p-8 text-center text-slate-500 italic">No accounts match.</td></tr>}
-            {visible.map((r) => (
-              <tr key={r.glId} className="hover:bg-slate-50/60">
-                <td className="p-4"><span className="font-mono font-bold text-slate-800">{r.entityCode}</span><div className="text-xs text-slate-500">{r.entityName}</div></td>
-                <td className="p-4"><span className="font-mono font-bold text-slate-800">{r.glId}</span><div className="text-xs text-slate-500">{r.description}</div></td>
-                <td className="p-4 font-semibold text-slate-700">{formatPeriod(r.activePeriod, "short")}<div className="text-xs font-normal text-slate-400">Closed through {formatPeriod(r.lastClosed, "short", "never")}</div></td>
-                <td className="p-4"><StageBadge stage={r.stage} /></td>
-                <td className="p-4 text-right font-mono">{r.openItems}</td>
-                <td className={`p-4 text-right font-mono ${r.missingSupport ? "text-rose-600 font-bold" : "text-slate-400"}`}>{r.missingSupport}</td>
-                <td className="p-4 text-xs text-slate-600">
-                  {r.assembler ? <div>Assembled: <b>{r.assembler.name}</b></div> : <div className="text-slate-400">Not assembled</div>}
-                  {r.reviewer && <div>Reviewed: <b>{r.reviewer.name}</b></div>}
-                  {r.lastActivity && <div className="text-slate-400">{formatDateTime(r.lastActivity)}</div>}
-                </td>
-                <td className="p-4"><Link href={`/account/${r.glId}`} className="inline-flex items-center gap-1 text-sm font-bold text-blue-600 hover:text-blue-800">Open <ChevronRight size={15} /></Link></td>
+      <Card className="overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[900px] text-sm">
+            <thead className={theadCls}>
+              <tr>
+                <th className={th}>Account</th><th className={th}>Entity</th><th className={th}>Period</th><th className={th}>Status</th>
+                <th className={cx(th, "text-right")}>Open items</th><th className={cx(th, "text-right")}>No support</th><th className={th}>Progress</th><th className="w-8" />
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+            </thead>
+            <tbody className={tbodyCls}>
+              {visible.length === 0 && <tr><td colSpan={8} className="px-4 py-12 text-center text-sm text-stone-500">No accounts match.</td></tr>}
+              {visible.map((r) => (
+                <tr key={r.glId} onClick={() => router.push(`/account/${r.glId}`)} className="group cursor-pointer hover:bg-stone-50">
+                  <td className={td}>
+                    <Link href={`/account/${r.glId}`} onClick={(e) => e.stopPropagation()} className="font-medium text-stone-900 hover:underline decoration-stone-300 underline-offset-4">{r.description}</Link>
+                    <div className="font-mono text-xs text-stone-500">{r.glId}</div>
+                  </td>
+                  <td className={td}><span className="font-mono text-xs text-stone-700">{r.entityCode}</span><div className="text-xs text-stone-500">{r.entityName}</div></td>
+                  <td className={td}><div className="text-stone-800">{formatPeriod(r.activePeriod, "short")}</div><div className="text-xs text-stone-400">Closed through {formatPeriod(r.lastClosed, "short", "never")}</div></td>
+                  <td className={td}><StageBadge stage={r.stage} /></td>
+                  <td className={cx(td, "num text-right", r.openItems ? "text-stone-800" : "text-stone-400")}>{r.openItems}</td>
+                  <td className={cx(td, "num text-right", r.missingSupport ? "font-medium text-rose-700" : "text-stone-400")}>{r.missingSupport}</td>
+                  <td className={cx(td, "text-xs text-stone-600")}>
+                    {r.assembler ? <div>Assembled by <span className="font-medium text-stone-800">{r.assembler.name}</span></div> : <div className="text-stone-400">Not assembled</div>}
+                    {r.reviewer && <div>Reviewed by <span className="font-medium text-stone-800">{r.reviewer.name}</span></div>}
+                    {r.lastActivity && <div className="text-stone-400">{formatDateTime(r.lastActivity)}</div>}
+                  </td>
+                  <td className="pr-3 text-stone-300 group-hover:text-stone-500"><ChevronRight size={16} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </Page>
   );
 }

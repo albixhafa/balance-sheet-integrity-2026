@@ -1,13 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Users, Building2, Plus, ChevronDown, ChevronRight, X, Loader2, ScrollText, Copy, Check, KeyRound, Lock } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Plus, ChevronRight, Loader2, Copy, Check, KeyRound, Lock, MoreHorizontal, Pencil, UserX, UserCheck, Unlock, Users, Building2, ScrollText } from "lucide-react";
 import {
   getAdminData, getAuditLog, createUser, updateUser, setUserStatus, resetUserPassword, unlockUser,
   createEntity, updateEntity, createGLAccount, updateGLAccount,
 } from "@/app/actions/admin";
 import { ROLE_LABEL, formatDateTime, formatPeriod } from "@/lib/format";
-import { ErrorBanner, SuccessBanner, handleAuthLoss } from "@/components/ui";
+import { Avatar } from "@/components/AppShell";
+import {
+  Page, PageHeader, Card, Button, Badge, Dialog, Field, CheckRow, PageLoading, Segmented, EmptyState,
+  ErrorBanner, SuccessBanner, handleAuthLoss, inputCls, th, td, theadCls, tbodyCls, cx,
+} from "@/components/ui";
 
 type Role = "ASSEMBLER" | "REVIEWER" | "APPROVER" | "ADMIN" | "SUPER_ADMIN";
 type User = { id: string; name: string; email: string; role: Role; status: string; isReadOnly: boolean; isLockedOut: boolean; requiresPasswordChange: boolean; entities: { code: string }[]; createdAt: string };
@@ -15,29 +19,60 @@ type GL = { id: string; description: string; status: string; txnCount: number; s
 type Entity = { code: string; name: string; status: string; glAccounts: GL[] };
 type Event = { id: string; at: string; action: string; actor: string; target: string | null; entityCode: string | null; glId: string | null; periodId: string | null; detail: unknown };
 type Tab = "users" | "entities" | "audit";
+type Confirm = { title: string; body: string; label: string; danger?: boolean; run: () => Promise<unknown> };
 
-const input = "w-full border border-slate-300 rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 disabled:text-slate-500";
 const isAdminRole = (r: string) => r === "ADMIN" || r === "SUPER_ADMIN";
-
-function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
-  return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className={`bg-white rounded-xl shadow-2xl w-full ${wide ? "max-w-2xl" : "max-w-md"} max-h-[90vh] flex flex-col`} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={title}>
-        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between shrink-0">
-          <h3 className="font-bold text-slate-900">{title}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700" aria-label="Close"><X size={20} /></button>
-        </div>
-        <div className="p-6 overflow-y-auto">{children}</div>
-      </div>
-    </div>
-  );
-}
+const ROLE_TONE: Record<Role, "violet" | "sky" | "amber" | "neutral"> = { SUPER_ADMIN: "violet", ADMIN: "violet", APPROVER: "sky", REVIEWER: "amber", ASSEMBLER: "neutral" };
 
 function StatusPill({ u }: { u: User }) {
-  if (u.status !== "ACTIVE") return <span className="text-xs font-semibold text-slate-500">Deactivated</span>;
-  if (u.isLockedOut) return <span className="text-xs font-bold text-rose-600">Locked out</span>;
-  if (u.requiresPasswordChange) return <span className="text-xs font-semibold text-amber-600">Awaiting first sign-in</span>;
-  return <span className="text-xs font-semibold text-emerald-600">Active</span>;
+  if (u.status !== "ACTIVE") return <Badge>Deactivated</Badge>;
+  if (u.isLockedOut) return <Badge tone="red"><Lock size={10} /> Locked out</Badge>;
+  if (u.requiresPasswordChange) return <Badge tone="amber">Awaiting first sign-in</Badge>;
+  return <Badge tone="green">Active</Badge>;
+}
+
+/** A compact "…" menu so each row carries one control instead of four links.
+ *  Positioned with `fixed` so the table's scroll container cannot clip it. */
+function RowMenu({ items }: { items: { label: string; icon: React.ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }[] }) {
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!pos) return;
+    const close = (e: MouseEvent) => { if (!menu.current?.contains(e.target as Node) && !btn.current?.contains(e.target as Node)) setPos(null); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setPos(null); };
+    const dismiss = () => setPos(null);
+    document.addEventListener("mousedown", close); document.addEventListener("keydown", esc);
+    window.addEventListener("scroll", dismiss, true); window.addEventListener("resize", dismiss);
+    return () => {
+      document.removeEventListener("mousedown", close); document.removeEventListener("keydown", esc);
+      window.removeEventListener("scroll", dismiss, true); window.removeEventListener("resize", dismiss);
+    };
+  }, [pos]);
+  const toggle = () => {
+    if (pos) { setPos(null); return; }
+    const r = btn.current!.getBoundingClientRect();
+    const height = items.length * 36 + 8;
+    const top = r.bottom + 4 + height > window.innerHeight ? r.top - 4 - height : r.bottom + 4;
+    setPos({ top, left: Math.max(8, r.right - 192) });
+  };
+  return (
+    <>
+      <button ref={btn} onClick={toggle} aria-label="Actions" aria-expanded={!!pos}
+        className={cx("rounded-md p-1.5 hover:bg-stone-100 hover:text-stone-800", pos ? "bg-stone-100 text-stone-800" : "text-stone-400")}><MoreHorizontal size={17} /></button>
+      {pos && (
+        <div ref={menu} role="menu" style={{ top: pos.top, left: pos.left }} className="fixed z-50 w-48 overflow-hidden rounded-lg border border-stone-200 bg-white py-1 text-left shadow-lg">
+          {items.map((it) => (
+            <button key={it.label} role="menuitem" disabled={it.disabled} onClick={() => { setPos(null); it.onClick(); }}
+              className={cx("flex h-9 w-full items-center gap-2.5 px-3 text-left text-sm disabled:opacity-40",
+                it.danger ? "text-rose-700 hover:bg-rose-50" : "text-stone-700 hover:bg-stone-50")}>
+              <span className={it.danger ? "text-rose-500" : "text-stone-400"}>{it.icon}</span> {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
 }
 
 export default function AdminPage() {
@@ -62,6 +97,7 @@ export default function AdminPage() {
   const [confirmStep, setConfirmStep] = useState(false);
   const [secret, setSecret] = useState<null | { who: string; password: string }>(null);
   const [copied, setCopied] = useState(false);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
 
   const load = useCallback(async () => {
     const res = await getAdminData();
@@ -83,6 +119,12 @@ export default function AdminPage() {
     if (success) setNotice(success);
     await load();
     return true;
+  };
+
+  const runConfirm = async () => {
+    if (!confirm) return;
+    await confirm.run();
+    setConfirm(null);
   };
 
   // ---- users ----
@@ -107,7 +149,6 @@ export default function AdminPage() {
     await load();
   };
   const doReset = async (u: User) => {
-    if (!window.confirm(`Reset the password for ${u.name}? They will be signed out everywhere and must choose a new password.`)) return;
     setBusy(true); setError(null);
     const res = await resetUserPassword(u.id);
     setBusy(false);
@@ -154,61 +195,71 @@ export default function AdminPage() {
     await load();
   };
 
-  if (loading) return <div className="flex h-full items-center justify-center p-8 text-slate-500"><Loader2 className="animate-spin mr-3" size={22} /> Loading…</div>;
+  if (loading) return <PageLoading />;
 
-  const tabBtn = (t: Tab, label: string, icon: React.ReactNode) => (
-    <button onClick={() => setTab(t)} className={`flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-semibold ${tab === t ? "bg-white text-blue-600 shadow-sm" : "text-slate-600 hover:text-slate-900"}`}>{icon} {label}</button>
-  );
+  const glCount = entities.reduce((s, en) => s + en.glAccounts.length, 0);
 
   return (
-    <div className="p-6 md:p-8 max-w-[1400px] mx-auto space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">Administration</h1>
-        <p className="text-sm text-slate-500 mt-1">Users, access and the ledger structure. Every change here is recorded in the audit log.</p>
-      </div>
-      <div className="flex flex-wrap gap-1 bg-slate-200/60 p-1 rounded-xl w-fit">
-        {tabBtn("users", "Users", <Users size={17} />)}
-        {tabBtn("entities", "Entities & GLs", <Building2 size={17} />)}
-        {tabBtn("audit", "Audit log", <ScrollText size={17} />)}
-      </div>
+    <Page>
+      <PageHeader title="Administration" description="Users, access and the ledger structure. Every change here is recorded in the audit log."
+        actions={tab === "users" ? <Button variant="primary" onClick={() => openUser(null)}><Plus size={15} /> New user</Button>
+          : tab === "entities" ? <Button variant="primary" onClick={() => openEntity(null)}><Plus size={15} /> New entity</Button> : undefined} />
+
+      <Segmented<Tab> value={tab} onChange={setTab} options={[
+        { value: "users", label: <><Users size={14} /> Users</>, count: users.length },
+        { value: "entities", label: <><Building2 size={14} /> Entities & GLs</>, count: entities.length },
+        { value: "audit", label: <><ScrollText size={14} /> Audit log</> },
+      ]} />
+
       <ErrorBanner message={error} onClose={() => setError(null)} />
       <SuccessBanner message={notice} onClose={() => setNotice(null)} />
 
       {tab === "users" && (
-        <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
-            <h2 className="font-semibold text-slate-800">{users.length} users</h2>
-            <button onClick={() => openUser(null)} className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg text-sm flex items-center gap-2"><Plus size={16} /> New user</button>
-          </div>
+        <Card className="overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left min-w-[900px]">
-              <thead className="text-xs text-slate-500 uppercase border-b border-slate-200">
-                <tr><th className="px-6 py-3">Name & email</th><th className="px-6 py-3">Role</th><th className="px-6 py-3">Entities</th><th className="px-6 py-3">Status</th><th className="px-6 py-3 text-right">Actions</th></tr>
+            <table className="w-full min-w-[820px] text-sm">
+              <thead className={theadCls}>
+                <tr><th className={th}>User</th><th className={th}>Role</th><th className={th}>Entities</th><th className={th}>Status</th><th className="w-12" /></tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className={tbodyCls}>
                 {users.map((u) => {
                   const self = u.id === meId;
                   const protectedSuper = u.role === "SUPER_ADMIN";
+                  const items = [
+                    { label: "Edit", icon: <Pencil size={14} />, onClick: () => openUser(u) },
+                    ...(!self && u.isLockedOut ? [{ label: "Unlock", icon: <Unlock size={14} />, onClick: () => act(() => unlockUser(u.id), `${u.name} unlocked.`), disabled: busy }] : []),
+                    ...(!self ? [{
+                      label: "Reset password", icon: <KeyRound size={14} />, disabled: busy,
+                      onClick: () => setConfirm({ title: `Reset password for ${u.name}?`, body: "They will be signed out everywhere and must choose a new password when they next sign in.", label: "Reset password", run: () => doReset(u) }),
+                    }] : []),
+                    ...(!self ? [u.status === "ACTIVE"
+                      ? { label: "Deactivate", icon: <UserX size={14} />, danger: true, disabled: busy,
+                          onClick: () => setConfirm({ title: `Deactivate ${u.name}?`, body: "They are signed out immediately and can no longer sign in. You can reactivate them later.", label: "Deactivate", danger: true, run: () => act(() => setUserStatus(u.id, "INACTIVE"), `${u.name} deactivated.`) }) }
+                      : { label: "Reactivate", icon: <UserCheck size={14} />, disabled: busy, onClick: () => act(() => setUserStatus(u.id, "ACTIVE"), `${u.name} reactivated.`) }] : []),
+                  ];
                   return (
-                    <tr key={u.id} className={u.status !== "ACTIVE" ? "bg-slate-50 opacity-75" : "hover:bg-slate-50/60"}>
-                      <td className="px-6 py-3"><div className="font-bold text-slate-900">{u.name}{self && <span className="ml-2 text-[10px] font-bold text-blue-600 uppercase">You</span>}</div><div className="text-xs text-slate-500">{u.email}</div></td>
-                      <td className="px-6 py-3">
-                        <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase border ${isAdminRole(u.role) ? "bg-purple-50 text-purple-700 border-purple-200" : u.role === "APPROVER" ? "bg-blue-50 text-blue-700 border-blue-200" : u.role === "REVIEWER" ? "bg-amber-50 text-amber-700 border-amber-200" : "bg-slate-100 text-slate-700 border-slate-200"}`}>{ROLE_LABEL[u.role]}</span>
-                        {u.isReadOnly && <span className="ml-1.5 px-2 py-1 rounded text-[10px] font-bold bg-slate-100 text-slate-500 border border-slate-200 uppercase">Read-only</span>}
-                      </td>
-                      <td className="px-6 py-3 text-xs text-slate-600">{isAdminRole(u.role) ? <span className="text-purple-600 font-semibold">All entities</span> : u.entities.length ? u.entities.map((e) => e.code).join(", ") : <span className="text-rose-500 italic">None - sees nothing</span>}</td>
-                      <td className="px-6 py-3"><StatusPill u={u} /></td>
-                      <td className="px-6 py-3 text-right whitespace-nowrap">
-                        {protectedSuper && !self ? <span className="text-[10px] font-bold text-slate-400 uppercase">Super admin</span> : (
-                          <div className="inline-flex items-center gap-3 text-xs font-semibold">
-                            <button onClick={() => openUser(u)} className="text-blue-600 hover:text-blue-800">Edit</button>
-                            {!self && u.isLockedOut && <button disabled={busy} onClick={() => act(() => unlockUser(u.id), `${u.name} unlocked.`)} className="text-amber-600 hover:text-amber-800">Unlock</button>}
-                            {!self && <button disabled={busy} onClick={() => doReset(u)} className="text-amber-600 hover:text-amber-800 inline-flex items-center gap-1"><KeyRound size={12} /> Reset password</button>}
-                            {!self && (u.status === "ACTIVE"
-                              ? <button disabled={busy} onClick={() => window.confirm(`Deactivate ${u.name}? They are signed out immediately.`) && act(() => setUserStatus(u.id, "INACTIVE"), `${u.name} deactivated.`)} className="text-rose-600 hover:text-rose-800">Deactivate</button>
-                              : <button disabled={busy} onClick={() => act(() => setUserStatus(u.id, "ACTIVE"), `${u.name} reactivated.`)} className="text-emerald-600 hover:text-emerald-800">Reactivate</button>)}
+                    <tr key={u.id} className={cx(u.status !== "ACTIVE" ? "bg-stone-50/60 text-stone-500" : "hover:bg-stone-50/60")}>
+                      <td className={td}>
+                        <div className="flex items-center gap-3">
+                          <Avatar name={u.name} />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 font-medium text-stone-900">{u.name}{self && <Badge tone="brand">You</Badge>}</div>
+                            <div className="truncate text-xs text-stone-500">{u.email}</div>
                           </div>
-                        )}
+                        </div>
+                      </td>
+                      <td className={td}>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <Badge tone={ROLE_TONE[u.role]}>{ROLE_LABEL[u.role]}</Badge>
+                          {u.isReadOnly && <Badge>Read-only</Badge>}
+                        </div>
+                      </td>
+                      <td className={cx(td, "text-xs")}>{isAdminRole(u.role) ? <span className="text-stone-500">All entities</span> : u.entities.length
+                        ? <span className="font-mono text-stone-700">{u.entities.map((e) => e.code).join(", ")}</span>
+                        : <span className="text-rose-600">None, sees nothing</span>}</td>
+                      <td className={td}><StatusPill u={u} /></td>
+                      <td className="pr-3 text-right">
+                        {protectedSuper && !self ? <Lock size={14} className="ml-auto text-stone-300" aria-label="Super admin" /> : <RowMenu items={items} />}
                       </td>
                     </tr>
                   );
@@ -216,197 +267,205 @@ export default function AdminPage() {
               </tbody>
             </table>
           </div>
-        </div>
+        </Card>
       )}
 
       {tab === "entities" && (
-        <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
-            <h2 className="font-semibold text-slate-800">{entities.length} entities</h2>
-            <button onClick={() => openEntity(null)} className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg text-sm flex items-center gap-2"><Plus size={16} /> New entity</button>
-          </div>
-          <div className="divide-y divide-slate-100">
+        <Card className="overflow-hidden">
+          <div className="border-b border-stone-100 px-5 py-3 text-[13px] text-stone-500">{entities.length} entities · {glCount} GL accounts</div>
+          {!entities.length && <EmptyState icon={<Building2 size={18} />} title="No entities yet" action={<Button variant="primary" onClick={() => openEntity(null)}><Plus size={15} /> New entity</Button>}>Create the first entity, then add its GL accounts.</EmptyState>}
+          <ul className="divide-y divide-stone-100">
             {entities.map((en) => {
               const open = expanded.includes(en.code);
               return (
-                <div key={en.code}>
-                  <div className="px-4 py-3 flex items-center gap-3 hover:bg-slate-50/60">
-                    <button onClick={() => setExpanded((x) => (open ? x.filter((c) => c !== en.code) : [...x, en.code]))} className="p-1 text-slate-400 hover:text-slate-700" aria-label="Toggle GLs">
-                      {open ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                <li key={en.code}>
+                  <div className="flex items-center gap-3 px-4 py-3 hover:bg-stone-50/60">
+                    <button onClick={() => setExpanded((x) => (open ? x.filter((c) => c !== en.code) : [...x, en.code]))} className="flex min-w-0 flex-1 items-center gap-3 text-left" aria-expanded={open}>
+                      <ChevronRight size={16} className={cx("shrink-0 text-stone-400 transition-transform", open && "rotate-90")} />
+                      <span className="w-20 shrink-0 font-mono text-[13px] font-medium text-stone-900">{en.code}</span>
+                      <span className="min-w-0 truncate text-sm text-stone-700">{en.name}</span>
+                      {en.status !== "ACTIVE" && <Badge>Inactive</Badge>}
+                      <span className="num ml-auto shrink-0 text-xs text-stone-400">{en.glAccounts.length} GL{en.glAccounts.length === 1 ? "" : "s"}</span>
                     </button>
-                    <span className="font-mono font-bold text-slate-900 w-20">{en.code}</span>
-                    <span className="flex-1 text-slate-700">{en.name}{en.status !== "ACTIVE" && <span className="ml-2 text-[10px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 px-1.5 py-0.5 rounded">Inactive</span>}</span>
-                    <span className="text-xs text-slate-500 w-20">{en.glAccounts.length} GL{en.glAccounts.length === 1 ? "" : "s"}</span>
-                    <button onClick={() => openEntity(en)} className="text-xs font-semibold text-blue-600 hover:text-blue-800">Edit</button>
-                    <button onClick={() => openGl(en.code, null)} className="text-xs font-bold px-3 py-1.5 rounded-md text-blue-600 bg-blue-50 hover:bg-blue-100">+ Add GL</button>
+                    <Button size="sm" variant="ghost" onClick={() => openEntity(en)}>Edit</Button>
+                    <Button size="sm" onClick={() => openGl(en.code, null)}><Plus size={13} /> Add GL</Button>
                   </div>
                   {open && (
-                    <div className="bg-slate-50/70 px-4 pb-4 pl-14">
-                      {!en.glAccounts.length ? <p className="text-sm text-slate-500 italic py-3">No GL accounts yet.</p> : (
-                        <table className="w-full text-sm bg-white border border-slate-200 rounded-lg overflow-hidden">
-                          <thead className="text-xs text-slate-500 uppercase border-b border-slate-200"><tr><th className="p-3 text-left">GL</th><th className="p-3 text-left">Description</th><th className="p-3 text-left">Dimensions</th><th className="p-3 text-right">Lines</th><th className="p-3"></th></tr></thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {en.glAccounts.map((g) => (
-                              <tr key={g.id} className={g.status !== "ACTIVE" ? "opacity-60" : ""}>
-                                <td className="p-3 font-mono font-bold">{g.id}</td>
-                                <td className="p-3">{g.description}{g.status !== "ACTIVE" && <span className="ml-2 text-[10px] font-bold uppercase text-slate-500">Inactive</span>}</td>
-                                <td className="p-3 text-xs text-slate-500">{g.subNames.filter(Boolean).join(", ") || "-"}</td>
-                                <td className="p-3 text-right font-mono text-xs">{g.txnCount}</td>
-                                <td className="p-3 text-right"><button onClick={() => openGl(en.code, g)} className="text-xs font-semibold text-blue-600 hover:text-blue-800">Edit</button></td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                    <div className="bg-stone-50/60 px-4 pb-4 pl-11">
+                      {!en.glAccounts.length ? <p className="py-3 text-sm text-stone-500">No GL accounts yet.</p> : (
+                        <div className="overflow-x-auto rounded-lg border border-stone-200 bg-white">
+                          <table className="w-full min-w-[640px] text-sm">
+                            <thead className={theadCls}><tr><th className={th}>GL</th><th className={th}>Description</th><th className={th}>Dimensions</th><th className={cx(th, "text-right")}>Lines</th><th className="w-16" /></tr></thead>
+                            <tbody className={tbodyCls}>
+                              {en.glAccounts.map((g) => (
+                                <tr key={g.id} className={g.status !== "ACTIVE" ? "text-stone-400" : ""}>
+                                  <td className="px-4 py-2.5 font-mono text-xs text-stone-700">{g.id}</td>
+                                  <td className="px-4 py-2.5">{g.description}{g.status !== "ACTIVE" && <span className="ml-2"><Badge>Inactive</Badge></span>}</td>
+                                  <td className="px-4 py-2.5 text-xs text-stone-500">{g.subNames.filter(Boolean).join(", ") || "—"}</td>
+                                  <td className="num px-4 py-2.5 text-right text-xs text-stone-600">{g.txnCount.toLocaleString()}</td>
+                                  <td className="px-2 py-2.5 text-right"><Button size="sm" variant="ghost" onClick={() => openGl(en.code, g)}>Edit</Button></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       )}
                     </div>
                   )}
-                </div>
+                </li>
               );
             })}
-          </div>
-        </div>
+          </ul>
+        </Card>
       )}
 
       {tab === "audit" && (
-        <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-200 bg-slate-50"><h2 className="font-semibold text-slate-800">Most recent 300 events</h2></div>
-          {!events ? <div className="p-6 text-slate-500 flex gap-2"><Loader2 className="animate-spin" size={18} /> Loading…</div> : (
+        <Card className="overflow-hidden">
+          <div className="border-b border-stone-100 px-5 py-3 text-[13px] text-stone-500">Most recent 300 events</div>
+          {!events ? <div className="flex items-center gap-2 p-6 text-sm text-stone-500"><Loader2 className="animate-spin" size={16} /> Loading…</div> : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left min-w-[900px]">
-                <thead className="text-xs text-slate-500 uppercase border-b border-slate-200"><tr><th className="px-4 py-3">When</th><th className="px-4 py-3">Who</th><th className="px-4 py-3">Action</th><th className="px-4 py-3">Where</th><th className="px-4 py-3">Detail</th></tr></thead>
-                <tbody className="divide-y divide-slate-100">
+              <table className="w-full min-w-[900px] text-sm">
+                <thead className={theadCls}><tr><th className={th}>When</th><th className={th}>Who</th><th className={th}>Action</th><th className={th}>Where</th><th className={th}>Detail</th></tr></thead>
+                <tbody className={tbodyCls}>
                   {events.map((e) => (
-                    <tr key={e.id}>
-                      <td className="px-4 py-2.5 text-xs text-slate-500 whitespace-nowrap">{formatDateTime(e.at)}</td>
-                      <td className="px-4 py-2.5 font-medium text-slate-800">{e.actor}</td>
-                      <td className="px-4 py-2.5"><span className="font-mono text-[11px] bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5">{e.action}</span>{e.target && <span className="text-xs text-slate-500"> → {e.target}</span>}</td>
-                      <td className="px-4 py-2.5 text-xs text-slate-600 font-mono">{[e.entityCode, e.glId, e.periodId && formatPeriod(e.periodId, "short")].filter(Boolean).join(" · ") || "-"}</td>
-                      <td className="px-4 py-2.5 text-xs text-slate-500 max-w-[380px] truncate" title={e.detail ? JSON.stringify(e.detail) : ""}>{e.detail ? JSON.stringify(e.detail) : ""}</td>
+                    <tr key={e.id} className="hover:bg-stone-50/60">
+                      <td className="num whitespace-nowrap px-4 py-2.5 text-xs text-stone-500">{formatDateTime(e.at)}</td>
+                      <td className="px-4 py-2.5 font-medium text-stone-800">{e.actor}</td>
+                      <td className="px-4 py-2.5"><span className="rounded bg-stone-100 px-1.5 py-0.5 font-mono text-[11px] text-stone-700">{e.action}</span>{e.target && <span className="text-xs text-stone-500"> → {e.target}</span>}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs text-stone-600">{[e.entityCode, e.glId, e.periodId && formatPeriod(e.periodId, "short")].filter(Boolean).join(" · ") || "—"}</td>
+                      <td className="max-w-[380px] truncate px-4 py-2.5 text-xs text-stone-500" title={e.detail ? JSON.stringify(e.detail) : ""}>{e.detail ? JSON.stringify(e.detail) : ""}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           )}
-        </div>
+        </Card>
       )}
 
       {userModal && (
-        <Modal title={userModal.user ? `Edit ${userModal.user.name}` : "New user"} onClose={() => setUserModal(null)}>
-          <form onSubmit={saveUser} className="space-y-4">
+        <Dialog title={userModal.user ? `Edit ${userModal.user.name}` : "New user"} onClose={() => setUserModal(null)}
+          description={userModal.user ? userModal.user.email : "They receive a temporary password to replace at first sign-in."}>
+          <form id="user-form" onSubmit={saveUser} className="space-y-4">
             <ErrorBanner message={modalError} />
-            <label className="block"><span className="block text-xs font-semibold text-slate-500 uppercase mb-1">Full name</span>
-              <input required maxLength={100} value={uf.name} onChange={(e) => setUf({ ...uf, name: e.target.value })} className={input} /></label>
-            <label className="block"><span className="block text-xs font-semibold text-slate-500 uppercase mb-1">Email</span>
-              <input required type="email" maxLength={254} value={uf.email} disabled={!!userModal.user} onChange={(e) => setUf({ ...uf, email: e.target.value })} className={input} /></label>
-            <label className="block"><span className="block text-xs font-semibold text-slate-500 uppercase mb-1">Role</span>
-              <select value={uf.role} disabled={userModal.user?.id === meId || uf.role === "SUPER_ADMIN"} onChange={(e) => setUf({ ...uf, role: e.target.value as Role })} className={input}>
-                <option value="ASSEMBLER">Assembler - imports, clears items, signs step 1</option>
-                <option value="REVIEWER">Reviewer - signs or rejects step 2</option>
-                <option value="APPROVER">Approver - signs or rejects step 3</option>
-                <option value="ADMIN">Admin - all entities, administration</option>
+            <Field label="Full name"><input required maxLength={100} value={uf.name} onChange={(e) => setUf({ ...uf, name: e.target.value })} className={inputCls} /></Field>
+            {!userModal.user && <Field label="Email"><input required type="email" maxLength={254} value={uf.email} onChange={(e) => setUf({ ...uf, email: e.target.value })} className={inputCls} /></Field>}
+            <Field label="Role" hint={userModal.user?.id === meId ? "You cannot change your own role." : undefined}>
+              <select value={uf.role} disabled={userModal.user?.id === meId || uf.role === "SUPER_ADMIN"} onChange={(e) => setUf({ ...uf, role: e.target.value as Role })} className={inputCls}>
+                <option value="ASSEMBLER">Assembler · imports, clears items, signs step 1</option>
+                <option value="REVIEWER">Reviewer · signs or rejects step 2</option>
+                <option value="APPROVER">Approver · signs or rejects step 3</option>
+                <option value="ADMIN">Admin · all entities, administration</option>
                 {uf.role === "SUPER_ADMIN" && <option value="SUPER_ADMIN">Super admin</option>}
               </select>
-              {userModal.user?.id === meId && <span className="text-[11px] text-slate-500 mt-1 block">You cannot change your own role.</span>}
-            </label>
+            </Field>
             {!isAdminRole(uf.role) && (
               <div>
-                <span className="block text-xs font-semibold text-slate-500 uppercase mb-1">Entities</span>
-                <div className="border border-slate-200 rounded-lg max-h-44 overflow-y-auto divide-y divide-slate-100">
+                <span className="mb-1.5 block text-[13px] font-medium text-stone-700">Entities</span>
+                <div className="max-h-44 divide-y divide-stone-100 overflow-y-auto rounded-lg border border-stone-200">
                   {entities.map((en) => (
-                    <label key={en.code} className="flex items-center gap-3 p-2.5 hover:bg-slate-50 cursor-pointer text-sm">
-                      <input type="checkbox" checked={uf.entityCodes.includes(en.code)}
+                    <label key={en.code} className="flex cursor-pointer items-center gap-3 px-3 py-2 text-sm hover:bg-stone-50">
+                      <input type="checkbox" className="size-4" checked={uf.entityCodes.includes(en.code)}
                         onChange={(e) => setUf({ ...uf, entityCodes: e.target.checked ? [...uf.entityCodes, en.code] : uf.entityCodes.filter((c) => c !== en.code) })} />
-                      <span className="font-mono font-bold">{en.code}</span><span className="text-slate-500">{en.name}</span>
+                      <span className="font-mono text-[13px] font-medium text-stone-800">{en.code}</span><span className="truncate text-stone-500">{en.name}</span>
                     </label>
                   ))}
                 </div>
-                {!uf.entityCodes.length && <span className="text-[11px] text-amber-600 mt-1 block">Without an entity this user will see nothing.</span>}
+                {!uf.entityCodes.length && <span className="mt-1.5 block text-xs text-amber-700">Without an entity this user will see nothing.</span>}
               </div>
             )}
-            <label className="flex items-center gap-3 p-3 bg-slate-50 border border-slate-200 rounded-lg cursor-pointer">
-              <input type="checkbox" checked={uf.isReadOnly} disabled={userModal.user?.id === meId} onChange={(e) => setUf({ ...uf, isReadOnly: e.target.checked })} />
-              <span className="text-sm"><b>Read-only</b><span className="block text-xs text-slate-500">Can view, cannot import, clear, attach or sign.</span></span>
-            </label>
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => setUserModal(null)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
-              <button type="submit" disabled={busy} className="px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-60 flex items-center gap-2">{busy && <Loader2 size={15} className="animate-spin" />}{userModal.user ? "Save changes" : "Create user"}</button>
-            </div>
+            <CheckRow checked={uf.isReadOnly} disabled={userModal.user?.id === meId} onChange={(v) => setUf({ ...uf, isReadOnly: v })} title="Read-only">
+              Can view, cannot import, clear, attach or sign.
+            </CheckRow>
           </form>
-        </Modal>
+          <div className="-mx-6 mt-5 flex justify-end gap-2 border-t border-stone-100 px-6 pt-4 pb-2">
+            <Button variant="ghost" onClick={() => setUserModal(null)}>Cancel</Button>
+            <Button variant="primary" type="submit" form="user-form" loading={busy}>{userModal.user ? "Save changes" : "Create user"}</Button>
+          </div>
+        </Dialog>
       )}
 
       {entityModal && (
-        <Modal title={entityModal.entity ? `Edit ${entityModal.entity.code}` : "New entity"} onClose={() => setEntityModal(null)}>
-          <form onSubmit={saveEntity} className="space-y-4">
+        <Dialog title={entityModal.entity ? `Edit ${entityModal.entity.code}` : "New entity"} onClose={() => setEntityModal(null)}>
+          <form id="entity-form" onSubmit={saveEntity} className="space-y-4">
             <ErrorBanner message={modalError} />
-            <label className="block"><span className="block text-xs font-semibold text-slate-500 uppercase mb-1">Entity code</span>
+            <Field label="Entity code" hint="Exactly 6 letters or digits. Permanent once created.">
               <input required pattern="[A-Za-z0-9]{6}" title="Exactly 6 letters or digits" maxLength={6} value={ef.code} disabled={!!entityModal.entity || confirmStep}
-                onChange={(e) => setEf({ ...ef, code: e.target.value.toUpperCase() })} className={`${input} font-mono uppercase`} placeholder="ABC001" />
-              <span className="text-[11px] text-slate-500 mt-1 block">Exactly 6 letters or digits. Permanent once created.</span></label>
-            <label className="block"><span className="block text-xs font-semibold text-slate-500 uppercase mb-1">Name</span>
-              <input required maxLength={100} value={ef.name} disabled={confirmStep} onChange={(e) => setEf({ ...ef, name: e.target.value })} className={input} /></label>
+                onChange={(e) => setEf({ ...ef, code: e.target.value.toUpperCase() })} className={cx(inputCls, "font-mono uppercase")} placeholder="ABC001" />
+            </Field>
+            <Field label="Name"><input required maxLength={100} value={ef.name} disabled={confirmStep} onChange={(e) => setEf({ ...ef, name: e.target.value })} className={inputCls} /></Field>
             {entityModal.entity && (
-              <label className="block"><span className="block text-xs font-semibold text-slate-500 uppercase mb-1">Status</span>
-                <select value={ef.status} onChange={(e) => setEf({ ...ef, status: e.target.value })} className={input}>
-                  <option value="ACTIVE">Active</option><option value="INACTIVE">Inactive - no imports, no new assembly</option>
-                </select></label>
+              <Field label="Status">
+                <select value={ef.status} onChange={(e) => setEf({ ...ef, status: e.target.value })} className={inputCls}>
+                  <option value="ACTIVE">Active</option><option value="INACTIVE">Inactive · no imports, no new assembly</option>
+                </select>
+              </Field>
             )}
-            {confirmStep && <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900 flex gap-2"><Lock size={16} className="shrink-0 mt-0.5" /> Confirm: entity <b className="font-mono">{ef.code}</b> "{ef.name}". The code cannot be changed later.</div>}
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => (confirmStep ? setConfirmStep(false) : setEntityModal(null))} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">{confirmStep ? "Back" : "Cancel"}</button>
-              <button type="submit" disabled={busy} className="px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-60">{entityModal.entity ? "Save" : confirmStep ? "Create entity" : "Continue"}</button>
-            </div>
+            {confirmStep && <div className="flex gap-2.5 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><Lock size={15} className="mt-0.5 shrink-0" /> <span>Create entity <b className="font-mono">{ef.code}</b> “{ef.name}”? The code cannot be changed later.</span></div>}
           </form>
-        </Modal>
+          <div className="-mx-6 mt-5 flex justify-end gap-2 border-t border-stone-100 px-6 pt-4 pb-2">
+            <Button variant="ghost" onClick={() => (confirmStep ? setConfirmStep(false) : setEntityModal(null))}>{confirmStep ? "Back" : "Cancel"}</Button>
+            <Button variant="primary" type="submit" form="entity-form" loading={busy}>{entityModal.entity ? "Save" : confirmStep ? "Create entity" : "Continue"}</Button>
+          </div>
+        </Dialog>
       )}
 
       {glModal && (
-        <Modal wide title={glModal.gl ? `Edit GL ${glModal.gl.id}` : `New GL in ${glModal.entityCode}`} onClose={() => setGlModal(null)}>
-          <form onSubmit={saveGl} className="space-y-4">
+        <Dialog wide title={glModal.gl ? `Edit GL ${glModal.gl.id}` : `New GL in ${glModal.entityCode}`} onClose={() => setGlModal(null)}>
+          <form id="gl-form" onSubmit={saveGl} className="space-y-4">
             <ErrorBanner message={modalError} />
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <label className="block"><span className="block text-xs font-semibold text-slate-500 uppercase mb-1">GL number</span>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <Field label="GL number" hint={!glModal.gl ? "Exactly 12 digits." : undefined}>
                 <input required pattern="\d{12}" title="Exactly 12 digits" maxLength={12} inputMode="numeric" value={gf.id} disabled={!!glModal.gl || confirmStep}
-                  onChange={(e) => setGf({ ...gf, id: e.target.value.replace(/\D/g, "") })} className={`${input} font-mono`} placeholder="100150000000" /></label>
-              <label className="block"><span className="block text-xs font-semibold text-slate-500 uppercase mb-1">Description</span>
-                <input required maxLength={200} value={gf.description} disabled={confirmStep} onChange={(e) => setGf({ ...gf, description: e.target.value })} className={input} /></label>
+                  onChange={(e) => setGf({ ...gf, id: e.target.value.replace(/\D/g, "") })} className={cx(inputCls, "font-mono")} placeholder="100150000000" />
+              </Field>
+              <Field label="Description"><input required maxLength={200} value={gf.description} disabled={confirmStep} onChange={(e) => setGf({ ...gf, description: e.target.value })} className={inputCls} /></Field>
             </div>
             {glModal.gl && (
-              <label className="block"><span className="block text-xs font-semibold text-slate-500 uppercase mb-1">Status</span>
-                <select value={gf.status} onChange={(e) => setGf({ ...gf, status: e.target.value })} className={input}>
-                  <option value="ACTIVE">Active</option><option value="INACTIVE">Inactive - no new imports</option>
-                </select></label>
+              <Field label="Status">
+                <select value={gf.status} onChange={(e) => setGf({ ...gf, status: e.target.value })} className={inputCls}>
+                  <option value="ACTIVE">Active</option><option value="INACTIVE">Inactive · no new imports</option>
+                </select>
+              </Field>
             )}
             <div>
-              <span className="block text-xs font-semibold text-slate-500 uppercase mb-2">Sub-account dimension labels (optional)</span>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+              <span className="mb-1.5 block text-[13px] font-medium text-stone-700">Sub-account dimension labels <span className="font-normal text-stone-400">(optional)</span></span>
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
                 {gf.subNames.map((v, i) => (
-                  <input key={i} maxLength={20} value={v} disabled={confirmStep} placeholder={`Sub ${i + 1}`}
-                    onChange={(e) => setGf({ ...gf, subNames: gf.subNames.map((s, k) => (k === i ? e.target.value : s)) })} className={`${input} text-xs`} />
+                  <input key={i} maxLength={20} value={v} disabled={confirmStep} placeholder={`Sub ${i + 1}`} aria-label={`Sub-account ${i + 1} label`}
+                    onChange={(e) => setGf({ ...gf, subNames: gf.subNames.map((s, k) => (k === i ? e.target.value : s)) })} className={cx(inputCls, "h-8 text-xs")} />
                 ))}
               </div>
             </div>
-            {confirmStep && <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900 flex gap-2"><Lock size={16} className="shrink-0 mt-0.5" /> Confirm: GL <b className="font-mono">{gf.id}</b> in {glModal.entityCode}. The number and entity cannot be changed later.</div>}
-            <div className="flex justify-end gap-2 pt-2">
-              <button type="button" onClick={() => (confirmStep ? setConfirmStep(false) : setGlModal(null))} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">{confirmStep ? "Back" : "Cancel"}</button>
-              <button type="submit" disabled={busy} className="px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-60">{glModal.gl ? "Save" : confirmStep ? "Create GL" : "Continue"}</button>
-            </div>
+            {confirmStep && <div className="flex gap-2.5 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><Lock size={15} className="mt-0.5 shrink-0" /> <span>Create GL <b className="font-mono">{gf.id}</b> in {glModal.entityCode}? The number and entity cannot be changed later.</span></div>}
           </form>
-        </Modal>
+          <div className="-mx-6 mt-5 flex justify-end gap-2 border-t border-stone-100 px-6 pt-4 pb-2">
+            <Button variant="ghost" onClick={() => (confirmStep ? setConfirmStep(false) : setGlModal(null))}>{confirmStep ? "Back" : "Cancel"}</Button>
+            <Button variant="primary" type="submit" form="gl-form" loading={busy}>{glModal.gl ? "Save" : confirmStep ? "Create GL" : "Continue"}</Button>
+          </div>
+        </Dialog>
+      )}
+
+      {confirm && (
+        <Dialog title={confirm.title} description={confirm.body} onClose={() => setConfirm(null)}
+          footer={<>
+            <Button variant="ghost" onClick={() => setConfirm(null)}>Cancel</Button>
+            <Button variant={confirm.danger ? "danger" : "primary"} loading={busy} onClick={runConfirm}>{confirm.label}</Button>
+          </>} />
       )}
 
       {secret && (
-        <Modal title="Temporary password" onClose={() => { setSecret(null); setCopied(false); }}>
-          <p className="text-sm text-slate-600">Give this to <b>{secret.who}</b> through a private channel. It is shown only once, and they must replace it when they first sign in.</p>
-          <div className="mt-4 flex items-center gap-2">
-            <code className="flex-1 bg-slate-100 border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-lg tracking-wide select-all">{secret.password}</code>
-            <button onClick={() => { navigator.clipboard.writeText(secret.password).then(() => setCopied(true)).catch(() => {}); }}
-              className="p-2.5 rounded-lg border border-slate-200 hover:bg-slate-50" aria-label="Copy password">{copied ? <Check size={18} className="text-emerald-600" /> : <Copy size={18} />}</button>
+        <Dialog title="Temporary password" onClose={() => { setSecret(null); setCopied(false); }}
+          description={<>Give this to <b className="text-stone-800">{secret.who}</b> through a private channel. It is shown only once, and they must replace it when they first sign in.</>}
+          footer={<Button variant="primary" onClick={() => { setSecret(null); setCopied(false); }}>Done</Button>}>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 select-all rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 font-mono text-lg tracking-wide text-stone-900">{secret.password}</code>
+            <Button onClick={() => { navigator.clipboard.writeText(secret.password).then(() => setCopied(true)).catch(() => {}); }} aria-label="Copy password" className="h-11 w-11 px-0">
+              {copied ? <Check size={17} className="text-emerald-600" /> : <Copy size={17} />}
+            </Button>
           </div>
-          <div className="flex justify-end mt-5"><button onClick={() => { setSecret(null); setCopied(false); }} className="px-4 py-2 text-sm font-semibold text-white bg-slate-900 rounded-lg">Done</button></div>
-        </Modal>
+        </Dialog>
       )}
-    </div>
+    </Page>
   );
 }
